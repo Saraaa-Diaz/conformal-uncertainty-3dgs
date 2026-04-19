@@ -1,0 +1,18 @@
+{
+  "scene": "truck",
+  "target_coverage": 90.0,
+  "actual_coverage": 87.32805116232083,
+  "calibration_threshold": 1.4908952713012695,
+  "prediction_interval_width": 0.05713753402233124,
+  "calibration_ratio": 0.5,
+  "alpha": 0.1,
+  "num_calibration_images": 16,
+  "num_test_images": 16,
+  "num_pixels_per_image": 5000,
+  "calibration_score_stats": {
+    "mean": 0.6886282563209534,
+    "std": 0.9732300639152527,
+    "min": 0.0,
+    "max": 16.84394645690918
+  }
+}
