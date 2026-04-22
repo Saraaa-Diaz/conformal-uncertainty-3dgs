@@ -36,7 +36,66 @@ where $q$ is a learned quantile threshold that guarantees coverage at level $1 -
 
 ---
 
-## Script 1: `uncertainty_from_gaussians.py`
+## Script 1: `uncertainty_maps.py`
+
+Estimates uncertainty from **per-image error statistics**.
+
+### Workflow
+
+```
+1. Load Test Images
+   ├─ Read rendered images from renders/ directory
+   └─ Read ground truth images from gt/ directory
+   
+2. Split into Calibration & Test
+   └─ First calib_ratio fraction → calibration set
+   └─ Remaining → test set
+   
+3. Calibration Phase
+   ├─ For each calibration image:
+   │  ├─ Compute per-pixel errors
+   │  ├─ Estimate σ = std(errors) across all pixels
+   │  ├─ Sample num_pixels random pixel locations
+   │  └─ Compute non-conformity scores: s = error / σ
+   ├─ Aggregate scores from all images
+   └─ Compute threshold: q = quantile_{1-α}(s)
+   
+4. Test Phase
+   ├─ For each test image:
+   │  ├─ Compute error map
+   │  ├─ Apply conformal prediction interval: error ≤ q · σ
+   │  └─ Track coverage
+   └─ Compute average coverage rate
+   
+5. Visualization & Metrics
+   └─ Save 5-column visualization per test image
+```
+
+### Mathematical Details
+
+#### Sigma Estimation
+
+For each calibration image:
+$$\sigma_{\text{img}} = \text{std}\left(\left\{\text{error}_{i,j} : (i,j) \in \text{image}\right\}\right)$$
+
+This is a **single scalar per image**, not per-pixel.
+
+#### Non-conformity Score
+
+For sampled pixels in calibration images:
+$$s = \frac{\text{error}}{\sigma_{\text{img}}}$$
+
+#### Prediction Interval
+
+For test pixels, using the learned threshold $q$:
+$$w = q \cdot \sigma_{\text{img}}$$
+
+Coverage: $\text{error} \leq w$
+
+---
+
+
+## Script 2: TODO
 
 Extracts uncertainty estimates from **3D Gaussian point cloud properties**.
 
@@ -144,119 +203,17 @@ Coverage rate: fraction of test pixels satisfying this condition.
 
 ---
 
-## Script 2: `uncertainty_maps.py`
-
-Simpler alternative that estimates uncertainty from **per-image error statistics**.
-
-### Workflow
-
-```
-1. Load Test Images
-   ├─ Read rendered images from renders/ directory
-   └─ Read ground truth images from gt/ directory
-   
-2. Split into Calibration & Test
-   └─ First calib_ratio fraction → calibration set
-   └─ Remaining → test set
-   
-3. Calibration Phase
-   ├─ For each calibration image:
-   │  ├─ Compute per-pixel errors
-   │  ├─ Estimate σ = std(errors) across all pixels
-   │  ├─ Sample num_pixels random pixel locations
-   │  └─ Compute non-conformity scores: s = error / σ
-   ├─ Aggregate scores from all images
-   └─ Compute threshold: q = quantile_{1-α}(s)
-   
-4. Test Phase
-   ├─ For each test image:
-   │  ├─ Compute error map
-   │  ├─ Apply conformal prediction interval: error ≤ q · σ
-   │  └─ Track coverage
-   └─ Compute average coverage rate
-   
-5. Visualization & Metrics
-   └─ Save 5-column visualization per test image
-```
-
-### Mathematical Details
-
-#### Sigma Estimation
-
-For each calibration image:
-$$\sigma_{\text{img}} = \text{std}\left(\left\{\text{error}_{i,j} : (i,j) \in \text{image}\right\}\right)$$
-
-This is a **single scalar per image**, not per-pixel.
-
-#### Non-conformity Score
-
-For sampled pixels in calibration images:
-$$s = \frac{\text{error}}{\sigma_{\text{img}}}$$
-
-#### Prediction Interval
-
-For test pixels, using the learned threshold $q$:
-$$w = q \cdot \sigma_{\text{img}}$$
-
-Coverage: $\text{error} \leq w$
-
----
 
 ## Usage Commands
 
 ### Setup
 
-Both scripts require the standard dependencies:
+The script requires the standard dependencies:
 ```bash
 pip install numpy matplotlib pillow scipy
 ```
 
-### 1. Uncertainty from Gaussians
-
-**Basic usage:**
-```bash
-python scripts/uncertainty_from_gaussians.py --scene train
-```
-
-**With custom parameters:**
-```bash
-python scripts/uncertainty_from_gaussians.py \
-    --scene drjohnson \
-    --calib-ratio 0.5 \
-    --alpha 0.1 \
-    --output-dir uncertainty_maps
-```
-
-**Arguments:**
-- `--scene`: Scene name (drjohnson, playroom, train, truck) [required]
-- `--calib-ratio`: Fraction of images for calibration (default: 0.5)
-- `--alpha`: Significance level; coverage = 1 - alpha (default: 0.1)
-- `--output-dir`: Output directory (default: uncertainty_maps)
-
-**Output files:**
-- `uncertainty_maps/{scene}/maps_from_gaussians_{scene}.png` — 6-column visualization
-- `uncertainty_maps/{scene}/metrics_from_gaussians.json` — Results and statistics
-
-**Expected output directory structure:**
-```
-output/
-├── {scene}/
-│   ├── point_cloud/
-│   │   └── iteration_30000/
-│   │       └── point_cloud.ply
-│   ├── cameras.json
-│   └── test/ours_30000/
-│       ├── renders/
-│       │   ├── 000.png
-│       │   ├── 001.png
-│       │   └── ...
-│       └── gt/
-│           ├── 000.png
-│           ├── 001.png
-│           └── ...
-```
-
-### 2. Uncertainty Maps
+### 1. Uncertainty Maps
 
 **Basic usage:**
 ```bash
@@ -286,29 +243,7 @@ python scripts/uncertainty_maps.py \
 
 ---
 
-## Comparison: Which to Use?
-
-| Aspect | From Gaussians | From Images |
-|--------|----------------|------------|
-| **Uncertainty Source** | 3D geometry (opacity, depth, count) | Empirical error statistics |
-| **Computation** | ~1-5 minutes per scene | ~30 seconds per scene |
-| **Interpretability** | Based on rendering confidence | Pure data-driven |
-| **Robustness** | Assumes Gaussians capture uncertainty well | Works with any renderer |
-| **Visualization** | 6 columns (includes Gaussian info) | 5 columns |
-| **Use when** | You trust your 3DGS model | You want simplicity & speed |
-
----
-
 ## Output Visualization
-
-### From Gaussians (6 columns)
-
-1. **Render** — Rendered image
-2. **Ground Truth** — Reference image
-3. **Absolute Error** — Pixel-wise error magnitude (hot colormap)
-4. **Per-pixel Sigma** — Uncertainty estimate from Gaussians (viridis)
-5. **Normalized Error** — error/sigma (plasma colormap)
-6. **Conformal Coverage** — Green=inside interval, Red=outside (RdYlGn)
 
 ### From Images (5 columns)
 
@@ -322,7 +257,7 @@ python scripts/uncertainty_maps.py \
 
 ## Metrics Output (JSON)
 
-Both scripts save metrics as JSON with structure:
+The scripts saves metrics as JSON with structure:
 
 ```json
 {
@@ -360,21 +295,13 @@ Both scripts save metrics as JSON with structure:
 ## Example Workflow
 
 ```bash
-# 1. Generate uncertainty from 3D Gaussians
-python scripts/uncertainty_from_gaussians.py \
-    --scene train \
-    --alpha 0.1 \
-    --calib-ratio 0.5
-
-# 2. Also generate uncertainty from image statistics
+# 1. Generate uncertainty from image statistics
 python scripts/uncertainty_maps.py \
     --scene train \
     --alpha 0.1 \
     --calib-ratio 0.5
 
-# 3. Compare results
-# - uncertainty_maps/train/maps_from_gaussians_train.png
-# - uncertainty_maps/train/map_train.png
+# 2. Compare results
 # - uncertainty_maps/train/metrics_from_gaussians.json
 # - uncertainty_maps/train/metrics.json
 ```
