@@ -1,18 +1,18 @@
 {
   "scene": "drjohnson",
   "target_coverage": 90.0,
-  "actual_coverage": 66.86929173331268,
-  "calibration_threshold": 1.5772206783294678,
-  "prediction_interval_width": 0.01957891136407852,
+  "actual_coverage": 89.40067686542302,
+  "calibration_threshold": 1.5772207280171069,
+  "prediction_interval_width": 0.0450576915307539,
   "calibration_ratio": 0.5,
   "alpha": 0.1,
   "num_calibration_images": 16,
   "num_test_images": 17,
   "num_pixels_per_image": 5000,
   "calibration_score_stats": {
-    "mean": 0.7349209189414978,
-    "std": 0.9529249668121338,
+    "mean": 0.734920915981914,
+    "std": 0.9529249925565075,
     "min": 0.0,
-    "max": 26.134056091308594
+    "max": 26.13405701410302
   }
 }

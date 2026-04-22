@@ -204,9 +204,6 @@ def visualize_test_images(test_dir, test_images, image_sigmas, threshold, output
     if len(test_images) == 1:
         axes = axes.reshape(1, -1)
     
-    # Use the first calibration image's sigma as default
-    default_sigma = list(image_sigmas.values())[0] if image_sigmas else 0.01
-    
     for idx, img in enumerate(test_images):
         render_path = os.path.join(test_dir, "renders", img)
         gt_path = os.path.join(test_dir, "gt", img)
@@ -215,12 +212,7 @@ def visualize_test_images(test_dir, test_images, image_sigmas, threshold, output
             print(f"  Warning: Skipping {img} - files not found")
             continue
         
-        sigma = image_sigmas.get(img, default_sigma)
-        normalized_error, coverage_map, error_map, interval_width = build_uncertainty_map(
-            render_path, gt_path, sigma, threshold
-        )
-        
-        # Load and display renders
+        # Compute sigma for this test image
         render = np.array(Image.open(render_path)).astype(np.float32) / 255.0
         gt = np.array(Image.open(gt_path)).astype(np.float32) / 255.0
         
@@ -228,6 +220,19 @@ def visualize_test_images(test_dir, test_images, image_sigmas, threshold, output
             render = np.stack([render] * 3, axis=-1)
         if len(gt.shape) == 2:
             gt = np.stack([gt] * 3, axis=-1)
+        
+        errors = np.abs(render - gt)
+        if len(errors.shape) == 3:
+            errors = np.mean(errors, axis=2)
+        
+        sigma = np.std(errors) if np.std(errors) > 0 else 0.01
+        image_sigmas[img] = sigma
+        
+        normalized_error, coverage_map, error_map, interval_width = build_uncertainty_map(
+            render_path, gt_path, sigma, threshold
+        )
+        
+        # Display renders (already loaded above)
         
         # Render
         axes[idx, 0].imshow(np.clip(render, 0, 1))
@@ -270,14 +275,13 @@ def compute_coverage_rate(test_dir, test_images, image_sigmas, threshold):
     Args:
         test_dir: Path to test directory
         test_images: List of test image filenames
-        image_sigmas: Dictionary of sigma estimates
+        image_sigmas: Dictionary of sigma estimates (populated during visualization)
         threshold: Quantile threshold from calibration
         
     Returns:
         Coverage rate as a percentage
     """
     coverage_vals = []
-    default_sigma = list(image_sigmas.values())[0] if image_sigmas else 0.01
     
     for img in test_images:
         render_path = os.path.join(test_dir, "renders", img)
@@ -294,7 +298,11 @@ def compute_coverage_rate(test_dir, test_images, image_sigmas, threshold):
         else:
             errors = np.abs(render - gt)
         
-        sigma = image_sigmas.get(img, default_sigma)
+        sigma = image_sigmas.get(img)
+        if sigma is None:
+            sigma = np.std(errors) if np.std(errors) > 0 else 0.01
+            image_sigmas[img] = sigma
+        
         within_interval = errors <= (threshold * sigma)
         coverage_vals.append(np.mean(within_interval))
     
@@ -355,13 +363,14 @@ def main():
     coverage_rate = compute_coverage_rate(test_dir, test_images, image_sigmas, threshold)
     
     # Save metrics as JSON
-    default_sigma = list(image_sigmas.values())[0] if image_sigmas else 0.01
+    # Compute average sigma across all images (calibration + test)
+    avg_sigma = np.mean(list(image_sigmas.values())) if image_sigmas else 0.01
     metrics = {
         "scene": scene,
         "target_coverage": (1 - args.alpha) * 100,
         "actual_coverage": coverage_rate * 100,
         "calibration_threshold": float(threshold),
-        "prediction_interval_width": float(threshold * default_sigma),
+        "prediction_interval_width": float(threshold * avg_sigma),
         "calibration_ratio": args.calib_ratio,
         "alpha": args.alpha,
         "num_calibration_images": len(calibration_images),
@@ -380,6 +389,7 @@ def main():
         json.dump(metrics, f, indent=2)
     
     # Print summary
+    avg_sigma = np.mean(list(image_sigmas.values())) if image_sigmas else 0.01
     print("\n" + "=" * 60)
     print("Conformal Uncertainty Quantification Complete!")
     print("=" * 60)
@@ -387,7 +397,7 @@ def main():
     print(f"Coverage target: {(1 - args.alpha) * 100}%")
     print(f"Actual coverage on test set: {coverage_rate * 100:.1f}%")
     print(f"Calibration threshold (q_{1 - args.alpha}): {threshold:.4f}")
-    print(f"Prediction interval width: {threshold * default_sigma:.4f}")
+    print(f"Average prediction interval width: {threshold * avg_sigma:.4f}")
     print(f"Output directory: {scene_output_dir}")
     print(f"Map saved to: {output_path}")
     print(f"Metrics saved to: {metrics_json_path}")
