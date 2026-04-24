@@ -25,7 +25,7 @@ def readImages(renders_dir, gt_dir):
     renders = []
     gts = []
     image_names = []
-    for fname in os.listdir(renders_dir):
+    for fname in sorted(os.listdir(renders_dir)):
         render = Image.open(renders_dir / fname)
         gt = Image.open(gt_dir / fname)
         renders.append(tf.to_tensor(render).unsqueeze(0)[:, :3, :, :].cuda())
@@ -50,8 +50,10 @@ def evaluate(model_paths):
             per_view_dict_polytopeonly[scene_dir] = {}
 
             test_dir = Path(scene_dir) / "test"
+            if not test_dir.exists():
+                raise FileNotFoundError(f"Missing test directory: {test_dir}")
 
-            for method in os.listdir(test_dir):
+            for method in sorted(os.listdir(test_dir)):
                 print("Method:", method)
 
                 full_dict[scene_dir][method] = {}
@@ -61,7 +63,9 @@ def evaluate(model_paths):
 
                 method_dir = test_dir / method
                 gt_dir = method_dir/ "gt"
-                renders_dir = method_dir / "renders"
+                renders_dir = method_dir / "render"
+                if not gt_dir.exists() or not renders_dir.exists():
+                    raise FileNotFoundError(f"Expected gt/render directories under {method_dir}")
                 renders, gts, image_names = readImages(renders_dir, gt_dir)
 
                 ssims = []
@@ -89,8 +93,8 @@ def evaluate(model_paths):
                 json.dump(full_dict[scene_dir], fp, indent=True)
             with open(scene_dir + "/per_view.json", 'w') as fp:
                 json.dump(per_view_dict[scene_dir], fp, indent=True)
-        except:
-            print("Unable to compute metrics for model", scene_dir)
+        except Exception as exc:
+            print(f"Unable to compute metrics for model {scene_dir}: {exc}")
 
 if __name__ == "__main__":
     device = torch.device("cuda:0")

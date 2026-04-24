@@ -142,7 +142,14 @@ def storePly(path, xyz, rgb):
     ply_data = PlyData([vertex_element])
     ply_data.write(path)
 
-def readColmapSceneInfo(path, images, depths, eval, train_test_exp, llffhold=8):
+def _load_split_names(split_dir, split_name):
+    split_path = os.path.join(split_dir, f"{split_name}.txt")
+    with open(split_path, "r") as handle:
+        names = [line.strip() for line in handle if line.strip()]
+    return names
+
+
+def readColmapSceneInfo(path, images, depths, eval, train_test_exp, split_dir="", llffhold=8):
     try:
         cameras_extrinsic_file = os.path.join(path, "sparse/0", "images.bin")
         cameras_intrinsic_file = os.path.join(path, "sparse/0", "cameras.bin")
@@ -176,7 +183,14 @@ def readColmapSceneInfo(path, images, depths, eval, train_test_exp, llffhold=8):
             print(f"An unexpected error occurred when trying to open depth_params.json file: {e}")
             sys.exit(1)
 
-    if eval:
+    split_dir = os.path.abspath(split_dir) if split_dir else ""
+    if split_dir:
+        train_split_names = _load_split_names(split_dir, "train")
+        calib_split_names = _load_split_names(split_dir, "calib")
+        test_split_names = _load_split_names(split_dir, "test")
+        split_name_union = set(train_split_names) | set(calib_split_names) | set(test_split_names)
+        test_cam_names_list = sorted(set(calib_split_names) | set(test_split_names))
+    elif eval:
         if "360" in path:
             llffhold = 8
         if llffhold:
@@ -197,8 +211,17 @@ def readColmapSceneInfo(path, images, depths, eval, train_test_exp, llffhold=8):
         depths_folder=os.path.join(path, depths) if depths != "" else "", test_cam_names_list=test_cam_names_list)
     cam_infos = sorted(cam_infos_unsorted.copy(), key = lambda x : x.image_name)
 
-    train_cam_infos = [c for c in cam_infos if train_test_exp or not c.is_test]
-    test_cam_infos = [c for c in cam_infos if c.is_test]
+    if split_dir:
+        unknown_split_names = sorted(split_name_union - {c.image_name for c in cam_infos})
+        if unknown_split_names:
+            raise ValueError(f"Split files reference unknown images: {unknown_split_names[:10]}")
+        train_name_set = set(train_split_names)
+        test_name_set = set(test_cam_names_list)
+        train_cam_infos = [c for c in cam_infos if c.image_name in train_name_set]
+        test_cam_infos = [c for c in cam_infos if c.image_name in test_name_set]
+    else:
+        train_cam_infos = [c for c in cam_infos if train_test_exp or not c.is_test]
+        test_cam_infos = [c for c in cam_infos if c.is_test]
 
     nerf_normalization = getNerfppNorm(train_cam_infos)
 

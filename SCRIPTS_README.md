@@ -1,330 +1,314 @@
-# Conformal Uncertainty Quantification for 3D Gaussian Splatting
+# 3DGS Rendering + Conformal Prep Scripts
 
-This document explains the two uncertainty quantification scripts and the conformal prediction framework they implement.
+This document explains the current script workflow in the `scripts` folder.
 
-## What is 'Error'?
+The scripts generate the raw artifacts needed for a later conformal stage:
 
-The **error** used in both scripts is the **per-pixel absolute difference** between the rendered image and ground truth:
+- RGB render + GT images
+- raw depth/disparity sigma sources as `.npz`
+- raw color sigma sources as `.npz`
+- deterministic train/calib/test split manifests
 
-$$\text{error}_{i} = \text{mean}_{\text{channels}} \left| \text{render}_{i} - \text{gt}_{i} \right|$$
+The conformal calibration/evaluation code is not implemented yet. These scripts produce the inputs that code will consume.
 
-For RGB images, we average across color channels. For grayscale, it's the simple absolute difference. Pixel values are normalized to [0, 1].
+## Current Pipeline
 
----
+### 1. Round-robin split
 
-## Conformal Prediction Framework
+We use a deterministic 10-frame cycle to avoid bias on consecutive video frames:
 
-Both scripts implement **distribution-free conformal prediction** for uncertainty quantification:
+- positions `0..6` in each block of 10: `train`
+- position `7`: `calib`
+- positions `8..9`: `test`
 
-### Core Idea
+If the sorted image list is
 
-Given a rendering error and an uncertainty estimate σ at each pixel, we construct a prediction interval:
-$$[\text{error} - q \cdot \sigma, \text{error} + q \cdot \sigma]$$
+$$I_0, I_1, I_2, \ldots,$$
 
-where $q$ is a learned quantile threshold that guarantees coverage at level $1 - \alpha$.
+then image $I_k$ is assigned by
 
-### Two-Phase Approach
+$$r = k \bmod 10$$
 
-**Phase 1: Calibration** (on calibration set)
-- Compute non-conformity scores: $s_i = \frac{|\text{error}_i|}{\sigma_i}$
-- Compute threshold: $q = \text{quantile}_{1-\alpha}(s_1, \ldots, s_n)$
+and
 
-**Phase 2: Prediction** (on test set)
-- Prediction interval width: $w = q \cdot \sigma$
-- Check coverage: does $|\text{error}| \leq w$?
-- Guaranteed: ≥ $(1-\alpha)$ of test pixels satisfy coverage
+$$
+\text{split}(I_k)=
+\begin{cases}
+\text{train} & \text{if } r \in \{0,1,2,3,4,5,6\} \\
+\text{calib} & \text{if } r = 7 \\
+\text{test} & \text{if } r \in \{8,9\}
+\end{cases}
+$$
 
----
+The script [scripts/prepare_round_robin_split.py](/Users/navalbhagat/projects/conformal-uncertainty-3dgs/scripts/prepare_round_robin_split.py) writes:
 
-## Script 1: `uncertainty_maps.py`
+- `train.txt`
+- `calib.txt`
+- `test.txt`
+- `summary.txt`
 
-Estimates uncertainty from **per-image error statistics**.
+These files are passed into the original 3DGS loading code through `--split_dir`.
 
-### Workflow
+### 2. Training on the original 3DGS pipeline
 
-```
-1. Load Test Images
-   ├─ Read rendered images from renders/ directory
-   └─ Read ground truth images from gt/ directory
-   
-2. Split into Calibration & Test
-   └─ First calib_ratio fraction → calibration set
-   └─ Remaining → test set
-   
-3. Calibration Phase
-   ├─ For each calibration image:
-   │  ├─ Compute per-pixel errors
-   │  ├─ Estimate σ = std(errors) across all pixels
-   │  ├─ Sample num_pixels random pixel locations
-   │  └─ Compute non-conformity scores: s = error / σ
-   ├─ Aggregate scores from all images
-   └─ Compute threshold: q = quantile_{1-α}(s)
-   
-4. Test Phase
-   ├─ For each test image:
-   │  ├─ Compute error map
-   │  ├─ Apply conformal prediction interval: error ≤ q · σ
-   │  └─ Track coverage
-   └─ Compute average coverage rate
-   
-5. Visualization & Metrics
-   └─ Save 5-column visualization per test image
-```
+The repo was patched so the scene loader can read `--split_dir` from `ModelParams`.
 
-### Mathematical Details
+At load time:
 
-#### Sigma Estimation
+- `train.txt` becomes the actual training camera set
+- `calib.txt` and `test.txt` are combined into the loader's held-out set
 
-For each calibration image:
-$$\sigma_{\text{img}} = \text{std}\left(\left\{\text{error}_{i,j} : (i,j) \in \text{image}\right\}\right)$$
+That means `train.py` now does the right thing for this project:
 
-This is a **single scalar per image**, not per-pixel.
+- optimize Gaussians using only the train views
+- keep calibration and test views out of optimization
 
-#### Non-conformity Score
+This is implemented in [scene/dataset_readers.py](/Users/navalbhagat/projects/conformal-uncertainty-3dgs/scene/dataset_readers.py), where the explicit split manifests override the repo's usual LLFF holdout logic.
 
-For sampled pixels in calibration images:
-$$s = \frac{\text{error}}{\sigma_{\text{img}}}$$
+### 3. Rendering held-out views
 
-#### Prediction Interval
+After training, the new scripts:
 
-For test pixels, using the learned threshold $q$:
-$$w = q \cdot \sigma_{\text{img}}$$
+- [scripts/render_color.py](/Users/navalbhagat/projects/conformal-uncertainty-3dgs/scripts/render_color.py)
+- [scripts/render_depth.py](/Users/navalbhagat/projects/conformal-uncertainty-3dgs/scripts/render_depth.py)
 
-Coverage: $\text{error} \leq w$
+load the trained model, read the same split manifests, and separate the held-out views back into:
 
----
+- `calib`
+- `test`
 
+So the original repo still treats held-out views as one group internally, but the custom renderers write separate calibration and test outputs for later conformal work.
 
-## Script 2: TODO
+## Output Layout
 
-Extracts uncertainty estimates from **3D Gaussian point cloud properties**.
+By default, outputs are written under:
 
-### Workflow
-
-```
-1. Load 3D Gaussian Point Cloud
-   └─ Read point_cloud.ply from 3DGS training
-   
-2. Extract Gaussian Properties
-   ├─ Positions: xyz coordinates
-   ├─ Opacities: σ_a (from log-space)
-   └─ Scales: σ_xyz (from log-space)
-   
-3. Parse Camera Parameters
-   └─ Extract K (intrinsic), R, t (extrinsic) from cameras.json
-   
-4. Project Gaussians → Uncertainty Map
-   ├─ Transform Gaussians to camera space
-   ├─ Project to 2D image plane
-   ├─ Accumulate per-pixel properties using 2D Gaussian weights
-   └─ Compute per-pixel σ from Gaussian properties
-   
-5. Calibration Phase
-   ├─ Project Gaussians to calibration images
-   ├─ Compute per-pixel errors
-   ├─ Compute non-conformity scores: s = error / σ
-   └─ Compute threshold: q = quantile_{1-α}(s)
-   
-6. Test Phase & Evaluation
-   ├─ Check coverage on test images
-   ├─ Compute confidence intervals
-   └─ Visualize and save metrics
+```text
+output/<run_name>/<split>/ours_<iteration>/
 ```
 
-### Mathematical Details
+For each split, the scripts write:
 
-#### Gaussian Projection (Step 4)
+```text
+gt/<frame>.png
+render/<frame>.png
+raw_sigma/depth/<frame>.npz
+raw_sigma/color/<frame>.npz
+preview/depth/<frame>.png
+preview/color/<frame>.png
+metadata.json
+```
 
-For each Gaussian $j$ at world position $\mathbf{P}_j$:
+Important conventions:
 
-1. **Transform to camera space:**
-   $$\mathbf{P}_j^{\text{cam}} = (\mathbf{P}_j - \mathbf{t}) \mathbf{R}^T$$
+- RGB images are saved as PNG in `[0,255]`
+- raw sigma arrays are saved as `.npz`
+- raw sigma arrays are not normalized or clipped
+- preview PNGs are visualization-only and may be normalized/clipped
+- the conformal stage should consume `.npz`, not the preview PNGs
 
-2. **Project to 2D image:**
-   $$\mathbf{u}_j = \mathbf{K} \mathbf{P}_j^{\text{cam}} / z_j$$
-   
-   where $\mathbf{K}$ is the intrinsic matrix:
-   $$\mathbf{K} = \begin{bmatrix} f_x & 0 & c_x \\ 0 & f_y & c_y \\ 0 & 0 & 1 \end{bmatrix}$$
+## Script Roles
 
-3. **Compute projected 2D Gaussian:**
-   - Pixel standard deviation: $\sigma_{\text{pixel}} = \frac{\|\mathbf{s}_j\| \cdot f_x}{z_j}$
-   - where $\|\mathbf{s}_j\|$ is the magnitude of the 3D scale
-   - Projection radius: $r = 3\sigma_{\text{pixel}}$
+### `render_common.py`
 
-4. **Accumulate per-pixel properties:**
-   
-   For each pixel $\mathbf{p}$ within radius $r$ of $\mathbf{u}_j$:
-   $$w_j(\mathbf{p}) = \exp\left(-\frac{\|\mathbf{p} - \mathbf{u}_j\|^2}{2\sigma_{\text{pixel}}^2}\right)$$
-   
-   Accumulate weighted contributions:
-   - $C(\mathbf{p}) \leftarrow C(\mathbf{p}) + w_j(\mathbf{p})$
-   - $A(\mathbf{p}) \leftarrow A(\mathbf{p}) + \alpha_j \cdot w_j(\mathbf{p})$
-   - $Z(\mathbf{p}) \leftarrow Z(\mathbf{p}) + z_j \cdot w_j(\mathbf{p})$
-   - $Z^2(\mathbf{p}) \leftarrow Z^2(\mathbf{p}) + z_j^2 \cdot w_j(\mathbf{p})$
-   - $S(\mathbf{p}) \leftarrow S(\mathbf{p}) + \|\mathbf{s}_j\| \cdot w_j(\mathbf{p})$
+[scripts/render_common.py](/Users/navalbhagat/projects/conformal-uncertainty-3dgs/scripts/render_common.py) contains the shared plumbing:
 
-5. **Normalize:**
-   $$\bar{A}(\mathbf{p}) = \frac{A(\mathbf{p})}{C(\mathbf{p})}$$
-   $$\bar{Z}(\mathbf{p}) = \frac{Z(\mathbf{p})}{C(\mathbf{p})}$$
-   $$\text{Var}_Z(\mathbf{p}) = \frac{Z^2(\mathbf{p})}{C(\mathbf{p})} - \bar{Z}(\mathbf{p})^2$$
+- argument parsing
+- scene/model loading
+- split manifest loading
+- view selection
+- output directory creation
+- RGB saving
+- preview normalization
+- metadata merging
+- train/test exposure safety checks
+- `train_test_exp` crop application
 
-#### Sigma Computation (Step 5)
+The important helper is `select_views(...)`:
 
-At each pixel, σ combines three uncertainty sources:
+- train views come from `scene.getTrainCameras()`
+- calib/test views are looked up by image name from `scene.getTestCameras()`
 
-$$\sigma(\mathbf{p}) = 0.4 \cdot (1 - \bar{A}(\mathbf{p})) + 0.4 \cdot \frac{\text{Var}_Z(\mathbf{p})}{\max(\text{Var}_Z)} + 0.2 \cdot \left(1 - \frac{C(\mathbf{p})}{\max(C)}\right)$$
+That is how one trained 3DGS model can be rendered separately on calib and test.
 
-Where:
-- **Opacity uncertainty:** $1 - \bar{A}$ — regions with low opacity are uncertain
-- **Depth variance:** normalized spread in depths across Gaussians
-- **Count uncertainty:** pixels hit by fewer Gaussians are uncertain
+### `render_depth.py`
 
-#### Non-conformity Score
+[scripts/render_depth.py](/Users/navalbhagat/projects/conformal-uncertainty-3dgs/scripts/render_depth.py) computes raw depth/disparity uncertainty quantities using alpha-composited scalar feature rendering.
 
-For each pixel in calibration images:
-$$s(\mathbf{p}) = \frac{|\text{render}(\mathbf{p}) - \text{gt}(\mathbf{p})|}{\sigma(\mathbf{p})}$$
+For each Gaussian, let its camera-space depth be
 
-#### Quantile Threshold
+$$z_i.$$
 
-Aggregate all calibration non-conformity scores and compute:
-$$q = \text{quantile}_{1-\alpha}(\{s_1, s_2, \ldots, s_n\})$$
+The script renders the following scalar fields with a black background and `override_color`:
 
-For example, if $\alpha = 0.1$ (90% coverage), compute the 90th percentile.
+- $z$
+- $z^2$
+- $1/z$
+- $(1/z)^2$
+- $1$
 
-#### Coverage Evaluation
+These give the per-pixel weighted sums:
 
-On test images, prediction interval width is:
-$$w = q \cdot \sigma(\mathbf{p})$$
+$$
+S_1(\mathbf{p}) = \sum_i w_i(\mathbf{p}) z_i
+$$
 
-Pixel is within interval if:
-$$|\text{render}(\mathbf{p}) - \text{gt}(\mathbf{p})| \leq w$$
+$$
+S_2(\mathbf{p}) = \sum_i w_i(\mathbf{p}) z_i^2
+$$
 
-Coverage rate: fraction of test pixels satisfying this condition.
+$$
+S_{1,\mathrm{inv}}(\mathbf{p}) = \sum_i w_i(\mathbf{p}) \frac{1}{z_i}
+$$
 
----
+$$
+S_{2,\mathrm{inv}}(\mathbf{p}) = \sum_i w_i(\mathbf{p}) \frac{1}{z_i^2}
+$$
 
+and the accumulated weight map
 
-## Usage Commands
+$$
+W(\mathbf{p}) = \sum_i w_i(\mathbf{p}).
+$$
 
-### Setup
+With mask
 
-The script requires the standard dependencies:
+$$
+\mathrm{mask}(\mathbf{p}) = W(\mathbf{p}) > \tau
+$$
+
+where $\tau$ is `weight_threshold`, the script computes
+
+$$
+\mathbb{E}[z](\mathbf{p}) = \frac{S_1(\mathbf{p})}{W(\mathbf{p})}
+$$
+
+$$
+\mathrm{Var}(z)(\mathbf{p}) = \frac{S_2(\mathbf{p})}{W(\mathbf{p})} - \mathbb{E}[z](\mathbf{p})^2
+$$
+
+$$
+\mathrm{Std}(z)(\mathbf{p}) = \sqrt{\max(\mathrm{Var}(z)(\mathbf{p}), 0)}
+$$
+
+and analogously
+
+$$
+\mathbb{E}[1/z](\mathbf{p}) = \frac{S_{1,\mathrm{inv}}(\mathbf{p})}{W(\mathbf{p})}
+$$
+
+$$
+\mathrm{Var}(1/z)(\mathbf{p}) = \frac{S_{2,\mathrm{inv}}(\mathbf{p})}{W(\mathbf{p})} - \mathbb{E}[1/z](\mathbf{p})^2
+$$
+
+$$
+\mathrm{Std}(1/z)(\mathbf{p}) = \sqrt{\max(\mathrm{Var}(1/z)(\mathbf{p}), 0)}.
+$$
+
+Each frame saves:
+
+- `Ez`
+- `depth_var`
+- `depth_std`
+- `E_inv`
+- `invdepth_var`
+- `invdepth_std`
+- `W`
+- `mask`
+
+in one `.npz`.
+
+### `render_color.py`
+
+[scripts/render_color.py](/Users/navalbhagat/projects/conformal-uncertainty-3dgs/scripts/render_color.py) follows the same moment-based idea for color.
+
+First, the script converts SH features to view-dependent RGB:
+
+$$
+\mathbf{c}_i = \mathrm{SH2RGB}_\text{view}(i).
+$$
+
+For each channel $c \in \{R,G,B\}$ it renders:
+
+- $c_i$
+- $c_i^2$
+- $1$
+
+which gives
+
+$$
+\mu_c(\mathbf{p}) = \frac{\sum_i w_i(\mathbf{p}) c_i}{W(\mathbf{p})}
+$$
+
+$$
+\mathrm{Var}_c(\mathbf{p}) = \frac{\sum_i w_i(\mathbf{p}) c_i^2}{W(\mathbf{p})} - \mu_c(\mathbf{p})^2
+$$
+
+$$
+\mathrm{Std}_c(\mathbf{p}) = \sqrt{\max(\mathrm{Var}_c(\mathbf{p}), 0)}.
+$$
+
+The script saves:
+
+- `color_mean_rgb`
+- `color_var_rgb`
+- `color_std_rgb`
+- `color_var`
+- `color_std`
+- `W`
+- `mask`
+
+where
+
+$$
+\mathrm{color\_var}(\mathbf{p}) = \frac{\mathrm{Var}_R(\mathbf{p}) + \mathrm{Var}_G(\mathbf{p}) + \mathrm{Var}_B(\mathbf{p})}{3}
+$$
+
+and
+
+$$
+\mathrm{color\_std}(\mathbf{p}) = \sqrt{\mathrm{color\_var}(\mathbf{p})}.
+$$
+
+This scalar `color_std` is the preview/default sigma-like quantity for later conformal processing, while the per-channel tensors are preserved in the `.npz` for flexibility.
+
+## How To Run
+
+### Minimal workflow
+
+1. Prepare split manifests
 ```bash
-pip install numpy matplotlib pillow scipy
+python3 scripts/prepare_round_robin_split.py \
+  --source_path /path/to/scene \
+  --images images \
+  --output_dir output/my_run/splits
 ```
 
-### 1. Uncertainty Maps
-
-**Basic usage:**
+2. Train 3DGS on train views only
 ```bash
-python scripts/uncertainty_maps.py --scene train
+python3 train.py \
+  -s /path/to/scene \
+  -m output/my_run \
+  --split_dir output/my_run/splits
 ```
 
-**With custom parameters:**
+3. Render held-out calibration and test RGB/sigma artifacts
 ```bash
-python scripts/uncertainty_maps.py \
-    --scene playroom \
-    --calib-ratio 0.6 \
-    --alpha 0.05 \
-    --num-pixels 10000 \
-    --output-dir my_uncertainty_output
+python3 scripts/render_color.py \
+  -m output/my_run \
+  --split_dir output/my_run/splits \
+  --skip_train
+
+python3 scripts/render_depth.py \
+  -m output/my_run \
+  --split_dir output/my_run/splits \
+  --skip_train
 ```
 
-**Arguments:**
-- `--scene`: Scene name (drjohnson, playroom, train, truck) [required]
-- `--num-pixels`: Pixels sampled per calibration image (default: 5000)
-- `--alpha`: Significance level; coverage = 1 - alpha (default: 0.1)
-- `--calib-ratio`: Fraction of images for calibration (default: 0.5)
-- `--output-dir`: Output directory (default: uncertainty_maps)
+## Notes And Caveats
 
-**Output files:**
-- `uncertainty_maps/{scene}/map_{scene}.png` — 5-column visualization
-- `uncertainty_maps/{scene}/metrics.json` — Results and statistics
-
----
-
-## Output Visualization
-
-### From Images (5 columns)
-
-1. **Render** — Rendered image
-2. **Ground Truth** — Reference image
-3. **Absolute Error** — Pixel-wise error (hot colormap)
-4. **Conformal Coverage** — Green=inside interval, Red=outside (RdYlGn)
-5. **Normalized Error** — error/interval_width (viridis colormap)
-
----
-
-## Metrics Output (JSON)
-
-The scripts saves metrics as JSON with structure:
-
-```json
-{
-  "scene": "train",
-  "target_coverage": 90.0,
-  "actual_coverage": 89.5,
-  "calibration_threshold": 1.282,
-  "calibration_ratio": 0.5,
-  "alpha": 0.1,
-  "num_calibration_images": 50,
-  "num_test_images": 50,
-  "calibration_score_stats": {
-    "mean": 1.001,
-    "std": 0.345,
-    "min": 0.001,
-    "max": 5.234
-  },
-  "sigma_map_stats": {
-    "mean": 0.025,
-    "std": 0.018,
-    "min": 0.010,
-    "max": 0.089
-  }
-}
-```
-
-**Key metrics:**
-- **target_coverage**: Desired coverage level (1 - α)
-- **actual_coverage**: Empirical coverage on test set
-- **calibration_threshold**: The learned quantile $q$
-- **calibration_score_stats**: Distribution of non-conformity scores used to learn $q$
-
----
-
-## Example Workflow
-
-```bash
-# 1. Generate uncertainty from image statistics
-python scripts/uncertainty_maps.py \
-    --scene train \
-    --alpha 0.1 \
-    --calib-ratio 0.5
-
-# 2. Compare results
-# - uncertainty_maps/train/metrics_from_gaussians.json
-# - uncertainty_maps/train/metrics.json
-```
-
----
-
-## Theoretical Guarantees
-
-**Conformal Prediction Guarantee:**
-
-If the calibration and test data are exchangeable (identically distributed), then:
-
-$$\mathbb{P}(|\hat{y}_i - y_i| \leq w_i) \geq 1 - \alpha - \frac{1}{n+1}$$
-
-where $w_i$ is the prediction interval width at test point $i$, and $n$ is the calibration set size.
-
-For large $n$, this approaches the desired coverage level $1 - \alpha$.
-
-**Key property:** This guarantee holds **distribution-free** — no assumptions about error distribution!
-
----
-
-## References
-
-- Vovk, V., Gammerman, A., & Shafer, G. (2005). Algorithmic learning in a random world.
-- Barber, R. F., Candes, E. J., Ramdas, A., & Tibshirani, R. J. (2023). Conformal prediction under covariate shift.
+- `render.py` from the original repo can also be used with `--split_dir`, but it only knows `train` and `test`, so its `test` output is the union of calib and test.
+- The new custom renderers are the ones that re-separate held-out views into `calib` and `test`.
+- Raw sigma arrays are saved without normalization or clipping on purpose.
+- Preview PNGs are only for inspection.
+- The later conformal stage must reuse the exact same epsilon, mask thresholds, and normalization rules between calibration and test.
