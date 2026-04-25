@@ -211,6 +211,19 @@ def main():
     analysis_name = f"{args.modality}_{sigma_key}"
     iteration = find_iteration(run_dir, args.iteration)
 
+    print("=" * 72)
+    print("Conformal Prediction")
+    print("=" * 72)
+    print(f"Run directory      : {run_dir}")
+    print(f"Modality           : {args.modality}")
+    print(f"Sigma key          : {sigma_key}")
+    print(f"RGB error mode     : {args.rgb_error_mode}")
+    print(f"Alpha              : {args.alpha}")
+    print(f"Target coverage    : {1.0 - args.alpha:.3f}")
+    print(f"Calib sample ratio : {args.calib_sample_ratio}")
+    print(f"Epsilon            : {args.eps}")
+    print(f"Iteration          : {iteration}")
+
     calib_dir = run_dir / "calib" / f"ours_{iteration}"
     test_dir = run_dir / "test" / f"ours_{iteration}"
     if not calib_dir.exists():
@@ -220,6 +233,11 @@ def main():
 
     calib_frames = list_frame_names(calib_dir, args.modality)
     test_frames = list_frame_names(test_dir, args.modality)
+    print(f"Calibration frames : {len(calib_frames)}")
+    print(f"Test frames        : {len(test_frames)}")
+    print(f"Calibration dir    : {calib_dir}")
+    print(f"Test dir           : {test_dir}")
+    print("Scanning calibration sigma values...")
 
     calib_sigma_values = []
     for frame_name in calib_frames:
@@ -230,13 +248,23 @@ def main():
     if not calib_sigma_values:
         raise ValueError("No valid calibration sigma values found.")
     normalization = compute_normalization(np.concatenate(calib_sigma_values), args.eps)
+    print(
+        "Sigma normalization: "
+        f"min={normalization['sigma_min']:.6f}, "
+        f"max={normalization['sigma_max']:.6f}, "
+        f"scale={normalization['sigma_scale']:.6f}"
+    )
 
     rng = np.random.default_rng(args.seed)
     calib_scores = []
     calib_frame_stats = {}
     calib_out_dirs = prepare_output_dirs(run_dir, "calib", iteration, analysis_name)
+    print(f"Calibration outputs: {calib_out_dirs['base']}")
+    print("Processing calibration frames...")
 
-    for frame_name in calib_frames:
+    total_calib_sampled_pixels = 0
+
+    for frame_idx, frame_name in enumerate(calib_frames, start=1):
         render_rgb = load_rgb(calib_dir / "render" / frame_name)
         gt_rgb = load_rgb(calib_dir / "gt" / frame_name)
         raw_sigma, mask = load_sigma_npz(calib_dir / "raw_sigma" / args.modality / frame_name.replace(".png", ".npz"), sigma_key)
@@ -250,6 +278,7 @@ def main():
         flat_sigma = sigma_safe.reshape(-1)
         sampled_scores = flat_error[sampled_indices] / flat_sigma[sampled_indices]
         calib_scores.extend(sampled_scores.tolist())
+        total_calib_sampled_pixels += sample_count
 
         frame_stem = frame_name.replace(".png", "")
         zero_uncertainty = np.zeros_like(sigma_norm, dtype=np.float32)
@@ -280,16 +309,26 @@ def main():
             "score_mean": float(np.mean(sampled_scores)),
             "score_std": float(np.std(sampled_scores)),
         }
+        print(
+            f"  [calib {frame_idx:>3}/{len(calib_frames)}] "
+            f"{frame_name} | pixels={num_pixels} sampled={sample_count} "
+            f"score_mean={calib_frame_stats[frame_name]['score_mean']:.6f}"
+        )
 
     q_hat, quantile_level = conformal_quantile(calib_scores, args.alpha)
+    print(f"Calibration scores : {len(calib_scores)}")
+    print(f"Quantile level     : {quantile_level:.6f}")
+    print(f"q_hat              : {q_hat:.6f}")
 
     test_out_dirs = prepare_output_dirs(run_dir, "test", iteration, analysis_name)
     all_test_coverage = []
     all_test_uncertainty = []
     per_view_metrics = {}
     per_view_corr = {}
+    print(f"Test outputs       : {test_out_dirs['base']}")
+    print("Processing test frames...")
 
-    for frame_name in test_frames:
+    for frame_idx, frame_name in enumerate(test_frames, start=1):
         render_rgb = load_rgb(test_dir / "render" / frame_name)
         gt_rgb = load_rgb(test_dir / "gt" / frame_name)
         raw_sigma, mask = load_sigma_npz(test_dir / "raw_sigma" / args.modality / frame_name.replace(".png", ".npz"), sigma_key)
@@ -310,6 +349,12 @@ def main():
             "interval_size_std": float(np.std(uncertainty_full_width)),
             "ae_uncertainty_corr": corr,
         }
+        print(
+            f"  [test  {frame_idx:>3}/{len(test_frames)}] "
+            f"{frame_name} | coverage={per_view_metrics[frame_name]['coverage']:.6f} "
+            f"mean_2u={per_view_metrics[frame_name]['mean_interval_size']:.6f} "
+            f"corr={corr:.6f}"
+        )
 
         frame_stem = frame_name.replace(".png", "")
         save_colormap(abs_error, test_out_dirs["abs_error"] / f"{frame_stem}.png", cmap_name="turbo")
@@ -368,6 +413,15 @@ def main():
     }
     with open(summary_dir / "metrics.json", "w") as handle:
         json.dump(summary, handle, indent=2)
+
+    print("-" * 72)
+    print(f"Total sampled calib pixels : {total_calib_sampled_pixels}")
+    print(f"Test pixel coverage        : {summary['test_pixel_coverage']:.6f}")
+    print(f"Mean interval size (2u)    : {summary['test_mean_interval_size']:.6f}")
+    print(f"Interval size std          : {summary['test_interval_size_std']:.6f}")
+    print(f"Mean per-view AE corr      : {summary['mean_per_view_ae_uncertainty_corr']:.6f}")
+    print(f"Summary metrics saved to   : {summary_dir / 'metrics.json'}")
+    print("=" * 72)
 
 
 if __name__ == "__main__":
