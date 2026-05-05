@@ -1,0 +1,126 @@
+#!/bin/bash
+#SBATCH --partition=gpu_a100
+#SBATCH --gres=gpu:1
+#SBATCH --gpus=1
+#SBATCH --cpus-per-task=8
+#SBATCH --job-name=cv2_uncertainty
+#SBATCH --ntasks=1
+#SBATCH --time=04:00:00
+#SBATCH --mem=64000M
+#SBATCH --output=outfiles/uncertainty_%A.out
+
+# End-to-end uncertainty pipeline for one scene.
+# Submit with:   SCENE=/gpfs/home4/pkarageorgis/datasets/tandt/train sbatch snellius_jobs/01_full_pipeline.job
+# Optional env: OUT, ITERS, ALPHA
+
+set -eu
+
+if [ -z "${SCENE:-}" ]; then
+    echo "ERROR: set SCENE=/path/to/scene"
+    exit 1
+fi
+
+OUT="${OUT:-output/$(basename "$SCENE")}"
+ITERS="${ITERS:-30000}"
+ALPHA="${ALPHA:-0.1}"
+
+module purge
+module load 2024
+module load Anaconda3/2024.06-1
+
+if [[ -n "${SLURM_SUBMIT_DIR:-}" ]]; then
+    REPO_ROOT="${SLURM_SUBMIT_DIR}"
+else
+    SCRIPT_DIR="$(cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    REPO_ROOT="$(realpath "${SCRIPT_DIR}/..")"
+fi
+cd "${REPO_ROOT}"
+
+source activate gaussian_splatting
+
+module load 2023
+module load CUDA/12.1.1
+export TORCH_CUDA_ARCH_LIST="8.0"
+
+SPLIT_DIR="$OUT/splits"
+RUN_DIR="$OUT"
+
+mkdir -p "$OUT" "$SPLIT_DIR"
+
+echo "================================================================"
+echo "Scene      : $SCENE"
+echo "Output     : $OUT"
+echo "Iterations : $ITERS"
+echo "Alpha      : $ALPHA"
+echo "Host       : $(hostname)"
+echo "Start      : $(date)"
+echo "================================================================"
+
+# Build/refresh extensions if missing.
+if ! python -c "import diff_gaussian_rasterization, simple_knn, fused_ssim" 2>/dev/null; then
+    echo "[setup] Building submodules ..."
+    pip install --no-build-isolation submodules/diff-gaussian-rasterization
+    pip install --no-build-isolation submodules/simple-knn
+    pip install --no-build-isolation submodules/fused-ssim
+fi
+
+# 1. Round-robin train/calib/test split
+echo "[1/8] Preparing split manifests"
+python scripts/prepare_round_robin_split.py \
+    --source_path "$SCENE" \
+    --images images \
+    --output_dir "$SPLIT_DIR"
+
+# 2. Train 3DGS on train.txt only
+echo "[2/8] Training 3DGS"
+python train.py -s "$SCENE" -m "$OUT" --split_dir "$SPLIT_DIR" --iterations "$ITERS" --eval
+
+# 3. Render color/depth raw sigma artifacts
+echo "[3/8] Rendering color sigma"
+python scripts/render_color.py -m "$OUT" --split_dir "$SPLIT_DIR" --skip_train
+
+echo "[4/8] Rendering depth sigma"
+python scripts/render_depth.py -m "$OUT" --split_dir "$SPLIT_DIR" --skip_train
+
+# 4. Top-K entropy
+echo "[5/8] Rendering entropy (top-K weights)"
+python scripts/render_entropy.py -m "$OUT" --split_dir "$SPLIT_DIR" --skip_train --top_k 4
+
+# 5. Fisher sensitivity (compute then render)
+echo "[6/8] Computing Fisher sensitivity (PUP3DGS)"
+python scripts/compute_sensitivity.py -m "$OUT"
+python scripts/render_per_gaussian_scalar.py \
+    -m "$OUT" --split_dir "$SPLIT_DIR" --skip_train \
+    --modality sensitivity \
+    --scores_path "$OUT/uncertainty/fishers.npz" \
+    --score_key fishers_log_dets \
+    --score_transform shift_positive
+
+# 6. Visibility (compute then render)
+echo "[7/8] Computing visibility (4DGS-W)"
+python scripts/compute_visibility.py -m "$OUT"
+python scripts/render_per_gaussian_scalar.py \
+    -m "$OUT" --split_dir "$SPLIT_DIR" --skip_train \
+    --modality visibility \
+    --scores_path "$OUT/uncertainty/visibility.npz" \
+    --score_key visibility_log
+
+# 7. Conformal prediction for every modality
+echo "[8/8] Conformal prediction across modalities"
+for MOD in color depth entropy sensitivity visibility; do
+    echo "    -> $MOD"
+    python scripts/conformal_prediction.py \
+        --run_dir "$RUN_DIR" \
+        --modality "$MOD" \
+        --alpha "$ALPHA" \
+        --calib_sample_ratio 0.1
+done
+
+# 8. Aggregate
+echo "[done] Aggregating results"
+python scripts/aggregate_results.py --run_dir "$RUN_DIR"
+
+echo "================================================================"
+echo "Pipeline complete. Results: $RUN_DIR/results.md"
+echo "End: $(date)"
+echo "================================================================"

@@ -1,0 +1,177 @@
+"""
+Re-run conformal prediction on the 90 held-out frames, but with a *random*
+30/60 calib/test split instead of the original round-robin (positions 7 vs 8-9
+in each block of 10). This restores calib/test exchangeability: with the
+deterministic round-robin split, test frames are systematically slightly
+further from any train frame than calib frames are, so test errors are larger
+and conformal under-covers.
+
+Reads existing rendered outputs (render/, gt/, raw_sigma/<modality>/), pools
+the 90 frames, shuffles, splits, runs conformal in-memory.
+
+Output: writes one summary metrics.json per modality under
+    <run_dir>/conformal/<modality>_<sigma_key>_random/ours_<iter>/metrics.json
+"""
+
+import argparse
+import glob
+import json
+import math
+from pathlib import Path
+
+import numpy as np
+from PIL import Image
+
+
+DEFAULT_SIGMA_KEYS = {
+    "color": "color_std",
+    "depth": "invdepth_std",
+    "entropy": "entropy",
+    "sensitivity": "sigma_mean",
+    "visibility": "sigma_mean",
+}
+
+
+def load_frame(split_dir, modality, frame_name, sigma_key):
+    rgb_render = np.asarray(Image.open(split_dir / "render" / frame_name).convert("RGB"), dtype=np.float32)
+    rgb_gt = np.asarray(Image.open(split_dir / "gt" / frame_name).convert("RGB"), dtype=np.float32)
+    npz = np.load(split_dir / "raw_sigma" / modality / frame_name.replace(".png", ".npz"))
+    sigma = np.asarray(npz[sigma_key], dtype=np.float32)
+    if sigma.ndim == 3:
+        sigma = sigma.mean(axis=0) if sigma.shape[0] in (1, 3) else sigma.mean(axis=-1)
+    mask = npz["mask"].astype(bool) if "mask" in npz.files else np.ones_like(sigma, dtype=bool)
+    return rgb_render, rgb_gt, sigma, mask
+
+
+def conformal_quantile(scores, alpha):
+    n = len(scores)
+    level = math.ceil((n + 1) * (1.0 - alpha)) / n
+    level = float(np.clip(level, 0.0, 1.0))
+    return float(np.quantile(scores, level, method="higher")), level
+
+
+def pearson(a, b):
+    a, b = a.reshape(-1), b.reshape(-1)
+    if a.std() < 1e-12 or b.std() < 1e-12 or a.size < 2:
+        return 0.0
+    return float(np.corrcoef(a, b)[0, 1])
+
+
+def run_one(modality, sigma_key, run_dir, iteration, alpha, calib_n, calib_sample_ratio, seed, eps):
+    calib_dir = run_dir / "calib" / f"ours_{iteration}"
+    test_dir = run_dir / "test" / f"ours_{iteration}"
+    pool = []
+    for sd in (calib_dir, test_dir):
+        for path in sorted((sd / "render").glob("*.png")):
+            pool.append((sd, path.name))
+    if len(pool) != 90:
+        print(f"  [warn] expected 90 pooled frames, got {len(pool)}")
+
+    rng = np.random.default_rng(seed)
+    perm = rng.permutation(len(pool))
+    calib_idx = perm[:calib_n].tolist()
+    test_idx = perm[calib_n:].tolist()
+    calib_pool = [pool[i] for i in calib_idx]
+    test_pool = [pool[i] for i in test_idx]
+
+    # Calibration: sample 10% per image, compute scores = |err|/sigma directly on raw sigma.
+    calib_scores = []
+    for sd, name in calib_pool:
+        render, gt, sigma, mask = load_frame(sd, modality, name, sigma_key)
+        err = np.abs(render - gt).mean(axis=2)  # mean over RGB channels
+        sigma_safe = np.maximum(sigma, eps)
+        n_pix = err.size
+        n_samp = max(1, int(math.ceil(calib_sample_ratio * n_pix)))
+        idx = rng.choice(n_pix, size=n_samp, replace=False)
+        flat_err = err.reshape(-1)[idx]
+        flat_sig = sigma_safe.reshape(-1)[idx]
+        flat_msk = mask.reshape(-1)[idx]
+        keep = flat_msk & np.isfinite(flat_err) & np.isfinite(flat_sig)
+        calib_scores.extend((flat_err[keep] / flat_sig[keep]).tolist())
+
+    q_hat, level = conformal_quantile(calib_scores, alpha)
+
+    # Test: every pixel.
+    cov_all, width_all, corrs, view_metrics = [], [], [], {}
+    for sd, name in test_pool:
+        render, gt, sigma, mask = load_frame(sd, modality, name, sigma_key)
+        err = np.abs(render - gt).mean(axis=2)
+        u = q_hat * sigma
+        within = err <= u
+        full_w = 2.0 * u
+        cov_all.append(within.reshape(-1))
+        width_all.append(full_w.reshape(-1))
+        corrs.append(pearson(err, full_w))
+        view_metrics[name] = {
+            "coverage": float(within.mean()),
+            "mean_interval_size": float(full_w.mean()),
+            "interval_size_std": float(full_w.std()),
+            "ae_corr": corrs[-1],
+        }
+    cov_all = np.concatenate(cov_all)
+    width_all = np.concatenate(width_all)
+
+    return {
+        "modality": modality,
+        "sigma_key": sigma_key,
+        "alpha": alpha,
+        "target_coverage": 1.0 - alpha,
+        "test_pixel_coverage": float(cov_all.mean()),
+        "test_mean_interval_size": float(width_all.mean()),
+        "test_interval_size_std": float(width_all.std()),
+        "mean_per_view_ae_uncertainty_corr": float(np.mean(corrs)) if corrs else 0.0,
+        "q_hat": q_hat,
+        "quantile_level": level,
+        "num_calib_frames": len(calib_pool),
+        "num_test_frames": len(test_pool),
+        "num_calib_scores": len(calib_scores),
+        "split_seed": seed,
+        "test_frame_metrics": view_metrics,
+    }
+
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--run_dir", required=True, type=str)
+    p.add_argument("--iteration", type=int, default=-1)
+    p.add_argument("--alpha", type=float, default=0.1)
+    p.add_argument("--calib_n", type=int, default=30)
+    p.add_argument("--calib_sample_ratio", type=float, default=0.1)
+    p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--eps", type=float, default=1e-6)
+    args = p.parse_args()
+
+    run_dir = Path(args.run_dir).resolve()
+    if args.iteration == -1:
+        candidates = []
+        for split in ("calib", "test"):
+            for d in (run_dir / split).iterdir():
+                if d.name.startswith("ours_"):
+                    candidates.append(int(d.name.split("_", 1)[1]))
+        iteration = max(candidates)
+    else:
+        iteration = args.iteration
+
+    print(f"Run dir   : {run_dir}")
+    print(f"Iteration : {iteration}")
+    print(f"alpha     : {args.alpha}, target cov: {1.0 - args.alpha:.3f}")
+    print(f"split     : random seed={args.seed}, calib_n={args.calib_n}")
+    print()
+    print(f"{'modality':12} {'cov':>7} {'mean_2u':>10} {'std_2u':>10} {'AE_corr':>10}")
+    print("-" * 56)
+
+    for mod, key in DEFAULT_SIGMA_KEYS.items():
+        try:
+            r = run_one(mod, key, run_dir, iteration, args.alpha, args.calib_n, args.calib_sample_ratio, args.seed, args.eps)
+        except FileNotFoundError as e:
+            print(f"{mod:12} skipped: {e}")
+            continue
+        out_dir = run_dir / "conformal" / f"{mod}_{key}_random" / f"ours_{iteration}"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        with open(out_dir / "metrics.json", "w") as fh:
+            json.dump(r, fh, indent=2)
+        print(f"{mod:12} {r['test_pixel_coverage']:7.4f} {r['test_mean_interval_size']:10.2f} {r['test_interval_size_std']:10.2f} {r['mean_per_view_ae_uncertainty_corr']:10.4f}")
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,125 @@
+#!/bin/bash
+#SBATCH --partition=gpu_a100
+#SBATCH --gres=gpu:1
+#SBATCH --gpus=1
+#SBATCH --cpus-per-task=8
+#SBATCH --job-name=cv2_build_sanity
+#SBATCH --ntasks=1
+#SBATCH --time=00:30:00
+#SBATCH --mem=32000M
+#SBATCH --output=outfiles/build_sanity_%A.out
+
+set -eu
+
+module purge
+module load 2024
+module load Anaconda3/2024.06-1
+
+if [[ -n "${SLURM_SUBMIT_DIR:-}" ]]; then
+    REPO_ROOT="${SLURM_SUBMIT_DIR}"
+else
+    SCRIPT_DIR="$(cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    REPO_ROOT="$(realpath "${SCRIPT_DIR}/..")"
+fi
+cd "${REPO_ROOT}"
+
+source activate gaussian_splatting
+
+# Need CUDA toolkit for nvcc and headers when building the extensions.
+module load 2023
+module load CUDA/12.1.1
+export TORCH_CUDA_ARCH_LIST="8.0"
+
+echo "==== ENV DEBUG ===="
+echo "HOST: $(hostname)"
+echo "DATE: $(date)"
+echo "CONDA_PREFIX: $CONDA_PREFIX"
+echo "PYTHON: $(which python)"
+python --version
+nvcc --version 2>&1 || true
+nvidia-smi -L || true
+echo "==================="
+
+# 1. Force a clean build of the modified rasterizer (and the others if missing).
+echo "[1/3] (Re)building diff-gaussian-rasterization with top-K patch ..."
+pip uninstall -y diff-gaussian-rasterization || true
+rm -rf submodules/diff-gaussian-rasterization/build submodules/diff-gaussian-rasterization/diff_gaussian_rasterization.egg-info
+pip install --no-build-isolation submodules/diff-gaussian-rasterization
+
+if ! python -c "import simple_knn" 2>/dev/null; then
+    echo "    + installing simple-knn"
+    pip install --no-build-isolation submodules/simple-knn
+fi
+if ! python -c "import fused_ssim" 2>/dev/null; then
+    echo "    + installing fused-ssim"
+    pip install --no-build-isolation submodules/fused-ssim
+fi
+
+# 2. Smoke test: import + tiny synthetic top-K call.
+echo "[2/3] Smoke test: rasterizer import + tiny synthetic top-K call"
+python - <<'PY'
+import torch
+from diff_gaussian_rasterization import GaussianRasterizationSettings, GaussianRasterizer
+
+assert torch.cuda.is_available(), "CUDA not visible to torch"
+
+# 4 synthetic Gaussians at the origin region, 64x64 image.
+device = "cuda"
+P = 4
+means = torch.tensor([[0., 0., 1.], [0.05, 0., 1.], [-0.02, 0.04, 1.], [0., -0.03, 1.]], device=device)
+opac = torch.full((P, 1), 0.5, device=device)
+scales = torch.full((P, 3), 0.05, device=device)
+rotations = torch.zeros((P, 4), device=device)
+rotations[:, 0] = 1.0
+W, H = 64, 64
+import math
+fov = math.radians(60.0)
+tanfov = math.tan(fov * 0.5)
+viewmat = torch.eye(4, device=device)
+viewmat[3, 2] = 0.0  # camera at origin looking +z (using row-major convention)
+projmat = viewmat.clone()
+campos = torch.zeros(3, device=device)
+bg = torch.zeros(3, device=device)
+
+settings = GaussianRasterizationSettings(
+    image_height=H, image_width=W,
+    tanfovx=tanfov, tanfovy=tanfov,
+    bg=bg, scale_modifier=1.0,
+    viewmatrix=viewmat, projmatrix=projmat,
+    sh_degree=0, campos=campos,
+    prefiltered=False, debug=False, antialiasing=False,
+)
+rast = GaussianRasterizer(settings)
+top_w, radii = rast.rasterize_topk_weights(
+    means3D=means, opacities=opac, scales=scales, rotations=rotations, top_k=4,
+)
+print("top_weights shape :", tuple(top_w.shape), "dtype:", top_w.dtype)
+print("max value         :", float(top_w.max()))
+print("min value         :", float(top_w.min()))
+print("nonzero pixels    :", int((top_w[0] > 0).sum()))
+print("OK -- rasterize_topk_weights produced a buffer.")
+PY
+
+# 3. Sanity load: open one of the existing scenes and confirm we can construct a
+#    Scene + GaussianModel without training.
+SCENE="/gpfs/home4/pkarageorgis/datasets/tandt/train"
+echo "[3/3] Scene load smoke test on $SCENE"
+python - <<PY
+import sys
+sys.path.insert(0, "${REPO_ROOT}")
+from arguments import ModelParams, PipelineParams
+from argparse import ArgumentParser
+parser = ArgumentParser()
+ModelParams(parser, sentinel=True)
+PipelineParams(parser)
+args = parser.parse_args([
+    "--source_path", "$SCENE",
+    "--model_path",  "$REPO_ROOT/output/_smoketest",
+    "--eval",
+])
+print("Source path:", args.source_path)
+print("Eval flag  :", args.eval)
+print("OK -- argument parsing works")
+PY
+
+echo "[done] Build + sanity passed"

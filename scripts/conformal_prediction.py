@@ -19,13 +19,20 @@ from scripts.render_common import ensure_dir, normalize_preview, save_npz
 DEFAULT_SIGMA_KEYS = {
     "color": "color_std",
     "depth": "invdepth_std",
+    "entropy": "entropy",
+    "sensitivity": "sigma_mean",
+    "visibility": "sigma_mean",
 }
 
 
 def parse_args():
-    parser = ArgumentParser(description="Conformal prediction from saved color/depth sigma maps")
+    parser = ArgumentParser(description="Conformal prediction from saved sigma maps")
     parser.add_argument("--run_dir", required=True, type=str, help="Run directory, e.g. output/my_run")
-    parser.add_argument("--modality", required=True, choices=["color", "depth"])
+    parser.add_argument(
+        "--modality",
+        required=True,
+        choices=["color", "depth", "entropy", "sensitivity", "visibility"],
+    )
     parser.add_argument("--sigma_key", default=None, type=str, help="Key to read from raw sigma .npz files")
     parser.add_argument("--iteration", default=-1, type=int, help="Iteration to use, default: latest")
     parser.add_argument("--alpha", default=0.1, type=float)
@@ -33,6 +40,14 @@ def parse_args():
     parser.add_argument("--seed", default=42, type=int)
     parser.add_argument("--eps", default=1e-6, type=float)
     parser.add_argument("--rgb_error_mode", default="mean", choices=["mean", "max"], help="How to reduce RGB absolute error across channels")
+    parser.add_argument(
+        "--sigma_norm",
+        default="none",
+        choices=["none", "minmax_calib", "minmax_pooled"],
+        help="How to normalize sigma. 'none' = use raw sigma (recommended). "
+             "'minmax_calib' = old behavior, fit on calib only (can underco0ver). "
+             "'minmax_pooled' = fit on calib+test together.",
+    )
     return parser.parse_args()
 
 
@@ -97,15 +112,23 @@ def compute_error(render_rgb, gt_rgb, modality, rgb_error_mode):
     return abs_diff.mean(axis=2)
 
 
-def compute_normalization(raw_sigma_values, eps):
+def compute_normalization(raw_sigma_values, eps, mode="minmax_calib"):
+    """
+    mode = 'none'         : identity normalization (sigma_norm = raw sigma).
+    mode = 'minmax_calib' : (sigma - min) / (max - min) using calib values only.
+    mode = 'minmax_pooled': caller passes calib+test sigma values together.
+    """
+    if mode == "none":
+        return {"mode": "none"}
     values = np.asarray(raw_sigma_values, dtype=np.float32)
     values = values[np.isfinite(values)]
     if values.size == 0:
-        raise ValueError("No finite calibration sigma values found.")
+        raise ValueError("No finite sigma values for normalization.")
     sigma_min = float(values.min())
     sigma_max = float(values.max())
     sigma_scale = max(sigma_max - sigma_min, eps)
     return {
+        "mode": mode,
         "sigma_min": sigma_min,
         "sigma_max": sigma_max,
         "sigma_scale": sigma_scale,
@@ -115,8 +138,11 @@ def compute_normalization(raw_sigma_values, eps):
 def normalize_sigma(raw_sigma, mask, normalization, eps):
     sigma = np.asarray(raw_sigma, dtype=np.float32)
     sigma = np.nan_to_num(sigma, nan=0.0, posinf=0.0, neginf=0.0)
-    sigma_norm = (sigma - normalization["sigma_min"]) / normalization["sigma_scale"]
-    sigma_norm = np.clip(sigma_norm, 0.0, 1.0).astype(np.float32)
+    if normalization.get("mode") == "none":
+        sigma_norm = sigma.copy()
+    else:
+        sigma_norm = (sigma - normalization["sigma_min"]) / normalization["sigma_scale"]
+        sigma_norm = np.clip(sigma_norm, 0.0, 1.0).astype(np.float32)
     sigma_norm[~mask] = 0.0
     sigma_safe = np.maximum(sigma_norm, eps)
     return sigma_norm, sigma_safe
@@ -208,7 +234,8 @@ def main():
     args = parse_args()
     run_dir = Path(args.run_dir).resolve()
     sigma_key = args.sigma_key or DEFAULT_SIGMA_KEYS[args.modality]
-    analysis_name = f"{args.modality}_{sigma_key}"
+    norm_tag = "" if args.sigma_norm == "minmax_calib" else f"_{args.sigma_norm}"
+    analysis_name = f"{args.modality}_{sigma_key}{norm_tag}"
     iteration = find_iteration(run_dir, args.iteration)
 
     print("=" * 72)
@@ -247,13 +274,27 @@ def main():
             calib_sigma_values.append(raw_sigma[valid])
     if not calib_sigma_values:
         raise ValueError("No valid calibration sigma values found.")
-    normalization = compute_normalization(np.concatenate(calib_sigma_values), args.eps)
-    print(
-        "Sigma normalization: "
-        f"min={normalization['sigma_min']:.6f}, "
-        f"max={normalization['sigma_max']:.6f}, "
-        f"scale={normalization['sigma_scale']:.6f}"
-    )
+
+    if args.sigma_norm == "minmax_pooled":
+        test_sigma_values = []
+        for frame_name in test_frames:
+            raw_sigma, mask = load_sigma_npz(test_dir / "raw_sigma" / args.modality / frame_name.replace(".png", ".npz"), sigma_key)
+            valid = np.isfinite(raw_sigma) & mask
+            if np.any(valid):
+                test_sigma_values.append(raw_sigma[valid])
+        pooled = np.concatenate(calib_sigma_values + test_sigma_values)
+        normalization = compute_normalization(pooled, args.eps, mode="minmax_pooled")
+    else:
+        normalization = compute_normalization(np.concatenate(calib_sigma_values), args.eps, mode=args.sigma_norm)
+    if normalization.get("mode") == "none":
+        print("Sigma normalization: none (raw sigma)")
+    else:
+        print(
+            f"Sigma normalization ({normalization['mode']}): "
+            f"min={normalization['sigma_min']:.6f}, "
+            f"max={normalization['sigma_max']:.6f}, "
+            f"scale={normalization['sigma_scale']:.6f}"
+        )
 
     rng = np.random.default_rng(args.seed)
     calib_scores = []

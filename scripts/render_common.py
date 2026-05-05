@@ -33,6 +33,7 @@ def build_parser(description):
     parser.add_argument("--skip_train", action="store_true")
     parser.add_argument("--skip_calib", action="store_true")
     parser.add_argument("--skip_test", action="store_true")
+    parser.add_argument("--top_k", type=int, default=4, help="K for top-K weight extraction (entropy renderer only)")
     parser.add_argument("--quiet", action="store_true")
     return parser, model, pipeline
 
