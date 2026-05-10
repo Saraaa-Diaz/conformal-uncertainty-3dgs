@@ -36,7 +36,7 @@ def main():
     iteration = max(iter_dirs)
 
     # Load pool of all 90 held-out frames.
-    from conformal_random_split import load_frame, conformal_quantile, pearson
+    from conformal_random_split import load_frame, conformal_quantile, pearson, ause
     pool = []
     for split in ("calib", "test"):
         sd = run_dir / split / f"ours_{iteration}"
@@ -77,28 +77,32 @@ def main():
                 calib_scores.extend((fe[keep] / fs[keep]).tolist())
             q_hat, _ = conformal_quantile(calib_scores, args.alpha)
 
-            covs, widths, corrs = [], [], []
+            covs, widths, corrs, auses = [], [], [], []
             for sd, name in test_pool:
                 render, gt, sigma, mask = load_frame(sd, mod, name, key)
                 err = np.abs(render - gt).mean(axis=2)
                 u = q_hat * sigma
-                covs.append((err <= u).mean())
-                widths.append((2.0 * u).mean())
-                corrs.append(pearson(err, 2.0 * u))
+                full_w = 2.0 * u
+                valid = np.isfinite(err) & np.isfinite(full_w) & mask
+                covs.append((err[valid] <= u[valid]).mean() if np.any(valid) else 0.0)
+                widths.append(full_w[valid].mean() if np.any(valid) else 0.0)
+                corrs.append(pearson(err[valid], full_w[valid]))
+                auses.append(ause(err, full_w, mask=valid))
             mean_cov = float(np.mean(covs))
             mean_w = float(np.mean(widths))
             mean_corr = float(np.mean(corrs))
-            results_per_mod[mod].append((mean_cov, mean_w, mean_corr))
-            print(f"  {mod:12} cov={mean_cov:.4f}  2u={mean_w:8.2f}  corr={mean_corr:+.4f}")
+            mean_ause = float(np.mean(auses))
+            results_per_mod[mod].append((mean_cov, mean_w, mean_corr, mean_ause))
+            print(f"  {mod:12} cov={mean_cov:.4f}  2u={mean_w:8.2f}  corr={mean_corr:+.4f}  ause={mean_ause:.4f}")
         print()
 
     print("=" * 64)
     print("CROSS-VALIDATED RESULTS (mean ± std over folds)")
     print("=" * 64)
-    print(f"{'modality':12} {'cov':>16} {'mean 2u':>16} {'AE corr':>14}")
+    print(f"{'modality':12} {'cov':>16} {'mean 2u':>16} {'AE corr':>14} {'AUSE':>14}")
     for mod, vals in results_per_mod.items():
-        c = np.array([v[0] for v in vals]); w = np.array([v[1] for v in vals]); r = np.array([v[2] for v in vals])
-        print(f"{mod:12} {c.mean():.4f}±{c.std():.4f}  {w.mean():9.2f}±{w.std():6.2f}    {r.mean():+.4f}±{r.std():.4f}")
+        c = np.array([v[0] for v in vals]); w = np.array([v[1] for v in vals]); r = np.array([v[2] for v in vals]); a = np.array([v[3] for v in vals])
+        print(f"{mod:12} {c.mean():.4f}±{c.std():.4f}  {w.mean():9.2f}±{w.std():6.2f}    {r.mean():+.4f}±{r.std():.4f}    {a.mean():.4f}±{a.std():.4f}")
 
 
 if __name__ == "__main__":

@@ -57,6 +57,39 @@ def pearson(a, b):
     return float(np.corrcoef(a, b)[0, 1])
 
 
+def ause(abs_error, uncertainty, mask=None):
+    errors = np.asarray(abs_error, dtype=np.float32).reshape(-1)
+    scores = np.asarray(uncertainty, dtype=np.float32).reshape(-1)
+    if mask is not None:
+        keep = np.asarray(mask, dtype=bool).reshape(-1)
+        errors = errors[keep]
+        scores = scores[keep]
+    keep = np.isfinite(errors) & np.isfinite(scores)
+    errors = errors[keep]
+    scores = scores[keep]
+    if errors.size <= 1:
+        return 0.0
+
+    def curve(order):
+        ordered = errors[order]
+        total = float(ordered.sum())
+        if total <= 1e-12:
+            return np.zeros(ordered.size + 1, dtype=np.float32)
+        removed = np.concatenate([[0.0], np.cumsum(ordered, dtype=np.float64)])
+        remaining = np.maximum(total - removed, 0.0)
+        counts = np.arange(ordered.size, -1, -1, dtype=np.float64)
+        values = np.zeros(ordered.size + 1, dtype=np.float64)
+        valid = counts > 0
+        values[valid] = remaining[valid] / counts[valid]
+        values /= values[0] if values[0] > 1e-12 else 1.0
+        return values.astype(np.float32)
+
+    sparse = curve(np.argsort(-scores, kind="mergesort"))
+    oracle = curve(np.argsort(-errors, kind="mergesort"))
+    fractions = np.linspace(0.0, 1.0, sparse.size, dtype=np.float32)
+    return float(np.trapz(sparse - oracle, fractions))
+
+
 def run_one(modality, sigma_key, run_dir, iteration, alpha, calib_n, calib_sample_ratio, seed, eps):
     calib_dir = run_dir / "calib" / f"ours_{iteration}"
     test_dir = run_dir / "test" / f"ours_{iteration}"
@@ -92,34 +125,49 @@ def run_one(modality, sigma_key, run_dir, iteration, alpha, calib_n, calib_sampl
     q_hat, level = conformal_quantile(calib_scores, alpha)
 
     # Test: every pixel.
-    cov_all, width_all, corrs, view_metrics = [], [], [], {}
+    covs, widths, width_stds, corrs, auses, view_metrics = [], [], [], [], [], {}
     for sd, name in test_pool:
         render, gt, sigma, mask = load_frame(sd, modality, name, sigma_key)
         err = np.abs(render - gt).mean(axis=2)
         u = q_hat * sigma
         within = err <= u
         full_w = 2.0 * u
-        cov_all.append(within.reshape(-1))
-        width_all.append(full_w.reshape(-1))
-        corrs.append(pearson(err, full_w))
+        valid = np.isfinite(err) & np.isfinite(full_w) & mask
+        coverage = float(within[valid].mean()) if np.any(valid) else 0.0
+        mean_width = float(full_w[valid].mean()) if np.any(valid) else 0.0
+        width_std = float(full_w[valid].std()) if np.any(valid) else 0.0
+        corr = pearson(err[valid], full_w[valid])
+        view_ause = ause(err, full_w, mask=valid)
+        covs.append(coverage)
+        widths.append(mean_width)
+        width_stds.append(width_std)
+        corrs.append(corr)
+        auses.append(view_ause)
         view_metrics[name] = {
-            "coverage": float(within.mean()),
-            "mean_interval_size": float(full_w.mean()),
-            "interval_size_std": float(full_w.std()),
-            "ae_corr": corrs[-1],
+            "num_pixels": int(err.size),
+            "num_valid_pixels": int(valid.sum()),
+            "coverage": coverage,
+            "mean_interval_size": mean_width,
+            "interval_size_std": width_std,
+            "ae_uncertainty_corr": corr,
+            "ause": view_ause,
         }
-    cov_all = np.concatenate(cov_all)
-    width_all = np.concatenate(width_all)
 
     return {
         "modality": modality,
         "sigma_key": sigma_key,
         "alpha": alpha,
         "target_coverage": 1.0 - alpha,
-        "test_pixel_coverage": float(cov_all.mean()),
-        "test_mean_interval_size": float(width_all.mean()),
-        "test_interval_size_std": float(width_all.std()),
+        "test_pixel_coverage": float(np.mean(covs)) if covs else 0.0,
+        "test_pixel_coverage_std": float(np.std(covs)) if covs else 0.0,
+        "test_mean_interval_size": float(np.mean(widths)) if widths else 0.0,
+        "test_mean_interval_size_std_per_view": float(np.std(widths)) if widths else 0.0,
+        "test_interval_size_std": float(np.mean(width_stds)) if width_stds else 0.0,
+        "test_interval_size_std_std_per_view": float(np.std(width_stds)) if width_stds else 0.0,
         "mean_per_view_ae_uncertainty_corr": float(np.mean(corrs)) if corrs else 0.0,
+        "std_per_view_ae_uncertainty_corr": float(np.std(corrs)) if corrs else 0.0,
+        "mean_per_view_ause": float(np.mean(auses)) if auses else 0.0,
+        "std_per_view_ause": float(np.std(auses)) if auses else 0.0,
         "q_hat": q_hat,
         "quantile_level": level,
         "num_calib_frames": len(calib_pool),
@@ -157,8 +205,8 @@ def main():
     print(f"alpha     : {args.alpha}, target cov: {1.0 - args.alpha:.3f}")
     print(f"split     : random seed={args.seed}, calib_n={args.calib_n}")
     print()
-    print(f"{'modality':12} {'cov':>7} {'mean_2u':>10} {'std_2u':>10} {'AE_corr':>10}")
-    print("-" * 56)
+    print(f"{'modality':12} {'cov':>7} {'mean_2u':>10} {'std_2u':>10} {'AE_corr':>10} {'AUSE':>10}")
+    print("-" * 68)
 
     for mod, key in DEFAULT_SIGMA_KEYS.items():
         try:
@@ -170,7 +218,7 @@ def main():
         out_dir.mkdir(parents=True, exist_ok=True)
         with open(out_dir / "metrics.json", "w") as fh:
             json.dump(r, fh, indent=2)
-        print(f"{mod:12} {r['test_pixel_coverage']:7.4f} {r['test_mean_interval_size']:10.2f} {r['test_interval_size_std']:10.2f} {r['mean_per_view_ae_uncertainty_corr']:10.4f}")
+        print(f"{mod:12} {r['test_pixel_coverage']:7.4f} {r['test_mean_interval_size']:10.2f} {r['test_interval_size_std']:10.2f} {r['mean_per_view_ae_uncertainty_corr']:10.4f} {r['mean_per_view_ause']:10.4f}")
 
 
 if __name__ == "__main__":

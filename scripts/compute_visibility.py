@@ -22,6 +22,8 @@ Output: <model_path>/uncertainty/visibility.npz
   - visibility       : (P,) total sum of w_i across all training pixels and views
   - visibility_log   : (P,) log(visibility + lambda)  (often more useful as a sigma)
   - visibility_norm  : (P,) per-Gaussian visibility / num_train_views (per-view avg)
+  - uncertainty      : (P,) 1 - sigmoid(C_k), low visibility => high uncertainty
+  - uncertainty_log  : (P,) log-compressed uncertainty for downstream rendering
   - num_train_views  : int
 """
 
@@ -55,6 +57,7 @@ def parse_args():
     pipeline = PipelineParams(parser)
     parser.add_argument("--iteration", default=-1, type=int)
     parser.add_argument("--lambda_reg", type=float, default=1e-6, help="Tikhonov term added before log")
+    parser.add_argument("--log_compression_eps", type=float, default=1e-3, help="Scale used by log1p(uncertainty / eps)")
     parser.add_argument("--max_views", type=int, default=-1)
     parser.add_argument("--output_name", type=str, default="visibility.npz")
     args = get_combined_args(parser)
@@ -119,6 +122,7 @@ def main():
     c1 = max(float(np.subtract(*np.percentile(vis_np, [75, 25])) / 2.0), args.lambda_reg)
     sig = 1.0 / (1.0 + np.exp(-(vis_np - c0) / c1))
     uncertainty = (1.0 - sig).astype(np.float32)
+    uncertainty_log = np.log1p(uncertainty / args.log_compression_eps).astype(np.float32)
     inv_visibility = (1.0 / (vis_np + args.lambda_reg)).astype(np.float32)
 
     out_dir = Path(dataset.model_path) / "uncertainty"
@@ -131,9 +135,13 @@ def main():
         visibility_log=visibility_log.detach().cpu().numpy().astype(np.float32),
         visibility_norm=visibility_norm.detach().cpu().numpy().astype(np.float32),
         uncertainty=uncertainty,
+        uncertainty_log=uncertainty_log,
+        visibility_uncertainty_log=uncertainty_log,
         inv_visibility=inv_visibility,
         sigmoid_c0=np.array(c0, dtype=np.float32),
         sigmoid_c1=np.array(c1, dtype=np.float32),
+        log_compression="log1p(uncertainty / log_compression_eps)",
+        log_compression_eps=np.array(args.log_compression_eps, dtype=np.float32),
         num_train_views=len(train_views),
         lambda_reg=args.lambda_reg,
     )
@@ -141,6 +149,7 @@ def main():
     print(f"Saved visibility to: {out_path}")
     print(f"  visibility range : [{float(visibility.min()):.4f}, {float(visibility.max()):.4f}]")
     print(f"  log range        : [{float(visibility_log.min()):.4f}, {float(visibility_log.max()):.4f}]")
+    print(f"  uncertainty_log  : [{float(uncertainty_log.min()):.4f}, {float(uncertainty_log.max()):.4f}]")
     print(f"  mean / std       : {float(visibility.mean()):.4f} / {float(visibility.std()):.4f}")
 
 

@@ -13,8 +13,6 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from scripts.render_common import ensure_dir, normalize_preview, save_npz
-
 
 DEFAULT_SIGMA_KEYS = {
     "color": "color_std",
@@ -23,6 +21,33 @@ DEFAULT_SIGMA_KEYS = {
     "sensitivity": "sigma_mean",
     "visibility": "sigma_mean",
 }
+
+
+def ensure_dir(path):
+    os.makedirs(path, exist_ok=True)
+
+
+def save_npz(path, **arrays):
+    np.savez_compressed(path, **arrays)
+
+
+def normalize_preview(array, mask=None):
+    preview = np.array(array, dtype=np.float32, copy=True)
+    finite_mask = np.isfinite(preview)
+    if mask is not None:
+        finite_mask &= mask.astype(bool)
+    if not np.any(finite_mask):
+        return np.zeros_like(preview, dtype=np.uint8)
+    values = preview[finite_mask]
+    lo = float(np.min(values))
+    hi = float(np.percentile(values, 99.0))
+    if hi <= lo:
+        hi = float(np.max(values))
+    if hi <= lo:
+        hi = lo + 1.0
+    preview = np.clip((preview - lo) / (hi - lo), 0.0, 1.0)
+    preview[~finite_mask] = 0.0
+    return np.rint(preview * 255.0).astype(np.uint8)
 
 
 def parse_args():
@@ -171,6 +196,81 @@ def pearson_corr(a, b):
     return float(np.corrcoef(a, b)[0, 1])
 
 
+def sparsification_curve(abs_error, uncertainty, mask=None):
+    errors = np.asarray(abs_error, dtype=np.float32).reshape(-1)
+    scores = np.asarray(uncertainty, dtype=np.float32).reshape(-1)
+    if mask is not None:
+        keep = np.asarray(mask, dtype=bool).reshape(-1)
+        errors = errors[keep]
+        scores = scores[keep]
+    keep = np.isfinite(errors) & np.isfinite(scores)
+    errors = errors[keep]
+    scores = scores[keep]
+    if errors.size == 0:
+        return np.array([0.0], dtype=np.float32), np.array([0.0], dtype=np.float32)
+
+    desc = np.argsort(-scores, kind="mergesort")
+    oracle = np.argsort(-errors, kind="mergesort")
+
+    def curve(order):
+        ordered_errors = errors[order]
+        total = float(ordered_errors.sum())
+        n = ordered_errors.size
+        if n == 0:
+            return np.array([0.0], dtype=np.float32)
+        if total <= 1e-12:
+            return np.zeros(n + 1, dtype=np.float32)
+        removed = np.concatenate([[0.0], np.cumsum(ordered_errors, dtype=np.float64)])
+        remaining = np.maximum(total - removed, 0.0)
+        remaining_count = np.arange(n, -1, -1, dtype=np.float64)
+        values = np.zeros(n + 1, dtype=np.float64)
+        valid = remaining_count > 0
+        values[valid] = remaining[valid] / remaining_count[valid]
+        values /= values[0] if values[0] > 1e-12 else 1.0
+        return values.astype(np.float32)
+
+    return curve(desc), curve(oracle)
+
+
+def ause(abs_error, uncertainty, mask=None):
+    sparse, oracle = sparsification_curve(abs_error, uncertainty, mask)
+    if sparse.size <= 1:
+        return 0.0
+    fractions = np.linspace(0.0, 1.0, sparse.size, dtype=np.float32)
+    return float(np.trapz(sparse - oracle, fractions))
+
+
+def finite_stats(array, mask=None):
+    values = np.asarray(array, dtype=np.float32)
+    valid = np.isfinite(values)
+    if mask is not None:
+        valid &= np.asarray(mask, dtype=bool)
+    if not np.any(valid):
+        return {
+            "min": 0.0,
+            "max": 0.0,
+            "mean": 0.0,
+            "std": 0.0,
+        }
+    values = values[valid]
+    return {
+        "min": float(values.min()),
+        "max": float(values.max()),
+        "mean": float(values.mean()),
+        "std": float(values.std()),
+    }
+
+
+def metric_mean(per_view_metrics, key):
+    values = [metrics[key] for metrics in per_view_metrics.values() if key in metrics]
+    return float(np.mean(values)) if values else 0.0
+
+
+def metric_std(per_view_metrics, key):
+    values = [metrics[key] for metrics in per_view_metrics.values() if key in metrics]
+    return float(np.std(values)) if values else 0.0
+
+
 def save_grayscale(array, path, mask=None):
     Image.fromarray(normalize_preview(array, mask=mask), mode="L").save(path)
 
@@ -314,7 +414,12 @@ def main():
 
         num_pixels = abs_error.size
         sample_count = max(1, min(int(math.ceil(args.calib_sample_ratio * num_pixels)), num_pixels))
-        sampled_indices = rng.choice(num_pixels, size=sample_count, replace=False)
+        valid_flat = (np.isfinite(abs_error) & np.isfinite(sigma_safe) & mask).reshape(-1)
+        valid_indices = np.flatnonzero(valid_flat)
+        if valid_indices.size == 0:
+            raise ValueError(f"No valid calibration pixels for {frame_name}")
+        sample_count = min(sample_count, valid_indices.size)
+        sampled_indices = rng.choice(valid_indices, size=sample_count, replace=False)
         flat_error = abs_error.reshape(-1)
         flat_sigma = sigma_safe.reshape(-1)
         sampled_scores = flat_error[sampled_indices] / flat_sigma[sampled_indices]
@@ -349,6 +454,9 @@ def main():
             "sampled_pixels": int(sample_count),
             "score_mean": float(np.mean(sampled_scores)),
             "score_std": float(np.std(sampled_scores)),
+            "raw_sigma": finite_stats(raw_sigma, mask),
+            "sigma_normalized": finite_stats(sigma_norm, mask),
+            "abs_error": finite_stats(abs_error, mask),
         }
         print(
             f"  [calib {frame_idx:>3}/{len(calib_frames)}] "
@@ -362,10 +470,7 @@ def main():
     print(f"q_hat              : {q_hat:.6f}")
 
     test_out_dirs = prepare_output_dirs(run_dir, "test", iteration, analysis_name)
-    all_test_coverage = []
-    all_test_uncertainty = []
     per_view_metrics = {}
-    per_view_corr = {}
     print(f"Test outputs       : {test_out_dirs['base']}")
     print("Processing test frames...")
 
@@ -378,23 +483,27 @@ def main():
         interval_half_width = q_hat * sigma_norm
         uncertainty_full_width = 2.0 * interval_half_width
         within_interval = abs_error <= interval_half_width
+        valid = np.isfinite(abs_error) & np.isfinite(uncertainty_full_width) & mask
 
-        all_test_coverage.append(within_interval.reshape(-1))
-        all_test_uncertainty.append(uncertainty_full_width.reshape(-1))
-
-        corr = pearson_corr(abs_error, uncertainty_full_width)
-        per_view_corr[frame_name] = corr
+        corr = pearson_corr(abs_error[valid], uncertainty_full_width[valid])
+        view_ause = ause(abs_error, uncertainty_full_width, mask=valid)
         per_view_metrics[frame_name] = {
-            "coverage": float(np.mean(within_interval)),
-            "mean_interval_size": float(np.mean(uncertainty_full_width)),
-            "interval_size_std": float(np.std(uncertainty_full_width)),
+            "num_pixels": int(abs_error.size),
+            "num_valid_pixels": int(valid.sum()),
+            "coverage": float(np.mean(within_interval[valid])) if np.any(valid) else 0.0,
+            "mean_interval_size": float(np.mean(uncertainty_full_width[valid])) if np.any(valid) else 0.0,
+            "interval_size_std": float(np.std(uncertainty_full_width[valid])) if np.any(valid) else 0.0,
             "ae_uncertainty_corr": corr,
+            "ause": view_ause,
+            "raw_sigma": finite_stats(raw_sigma, mask),
+            "sigma_normalized": finite_stats(sigma_norm, mask),
+            "abs_error": finite_stats(abs_error, mask),
         }
         print(
             f"  [test  {frame_idx:>3}/{len(test_frames)}] "
             f"{frame_name} | coverage={per_view_metrics[frame_name]['coverage']:.6f} "
             f"mean_2u={per_view_metrics[frame_name]['mean_interval_size']:.6f} "
-            f"corr={corr:.6f}"
+            f"corr={corr:.6f} ause={view_ause:.6f}"
         )
 
         frame_stem = frame_name.replace(".png", "")
@@ -423,11 +532,20 @@ def main():
             mask=mask.astype(np.bool_),
         )
 
-    all_test_coverage = np.concatenate(all_test_coverage)
-    all_test_uncertainty = np.concatenate(all_test_uncertainty)
-
     summary_dir = run_dir / "conformal" / analysis_name / f"ours_{iteration}"
     ensure_dir(str(summary_dir))
+    per_view_summary = {
+        "coverage_mean": metric_mean(per_view_metrics, "coverage"),
+        "coverage_std": metric_std(per_view_metrics, "coverage"),
+        "mean_interval_size_mean": metric_mean(per_view_metrics, "mean_interval_size"),
+        "mean_interval_size_std": metric_std(per_view_metrics, "mean_interval_size"),
+        "interval_size_std_mean": metric_mean(per_view_metrics, "interval_size_std"),
+        "interval_size_std_std": metric_std(per_view_metrics, "interval_size_std"),
+        "ae_uncertainty_corr_mean": metric_mean(per_view_metrics, "ae_uncertainty_corr"),
+        "ae_uncertainty_corr_std": metric_std(per_view_metrics, "ae_uncertainty_corr"),
+        "ause_mean": metric_mean(per_view_metrics, "ause"),
+        "ause_std": metric_std(per_view_metrics, "ause"),
+    }
     summary = {
         "run_dir": str(run_dir),
         "iteration": iteration,
@@ -445,10 +563,17 @@ def main():
         "quantile_level": quantile_level,
         "q_hat": q_hat,
         "sigma_normalization": normalization,
-        "test_pixel_coverage": float(np.mean(all_test_coverage)),
-        "test_mean_interval_size": float(np.mean(all_test_uncertainty)),
-        "test_interval_size_std": float(np.std(all_test_uncertainty)),
-        "mean_per_view_ae_uncertainty_corr": float(np.mean(list(per_view_corr.values()))) if per_view_corr else 0.0,
+        "test_pixel_coverage": per_view_summary["coverage_mean"],
+        "test_pixel_coverage_std": per_view_summary["coverage_std"],
+        "test_mean_interval_size": per_view_summary["mean_interval_size_mean"],
+        "test_mean_interval_size_std_per_view": per_view_summary["mean_interval_size_std"],
+        "test_interval_size_std": per_view_summary["interval_size_std_mean"],
+        "test_interval_size_std_std_per_view": per_view_summary["interval_size_std_std"],
+        "mean_per_view_ae_uncertainty_corr": per_view_summary["ae_uncertainty_corr_mean"],
+        "std_per_view_ae_uncertainty_corr": per_view_summary["ae_uncertainty_corr_std"],
+        "mean_per_view_ause": per_view_summary["ause_mean"],
+        "std_per_view_ause": per_view_summary["ause_std"],
+        "per_view_summary": per_view_summary,
         "calib_frame_stats": calib_frame_stats,
         "test_frame_metrics": per_view_metrics,
     }
@@ -457,10 +582,11 @@ def main():
 
     print("-" * 72)
     print(f"Total sampled calib pixels : {total_calib_sampled_pixels}")
-    print(f"Test pixel coverage        : {summary['test_pixel_coverage']:.6f}")
-    print(f"Mean interval size (2u)    : {summary['test_mean_interval_size']:.6f}")
-    print(f"Interval size std          : {summary['test_interval_size_std']:.6f}")
-    print(f"Mean per-view AE corr      : {summary['mean_per_view_ae_uncertainty_corr']:.6f}")
+    print(f"Mean per-view coverage     : {summary['test_pixel_coverage']:.6f} ± {summary['test_pixel_coverage_std']:.6f}")
+    print(f"Mean per-view 2u           : {summary['test_mean_interval_size']:.6f} ± {summary['test_mean_interval_size_std_per_view']:.6f}")
+    print(f"Mean per-view 2u std       : {summary['test_interval_size_std']:.6f} ± {summary['test_interval_size_std_std_per_view']:.6f}")
+    print(f"Mean per-view AE corr      : {summary['mean_per_view_ae_uncertainty_corr']:.6f} ± {summary['std_per_view_ae_uncertainty_corr']:.6f}")
+    print(f"Mean per-view AUSE         : {summary['mean_per_view_ause']:.6f} ± {summary['std_per_view_ause']:.6f}")
     print(f"Summary metrics saved to   : {summary_dir / 'metrics.json'}")
     print("=" * 72)
 

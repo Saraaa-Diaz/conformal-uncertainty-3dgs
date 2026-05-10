@@ -103,7 +103,7 @@ python scripts/render_per_gaussian_scalar.py \
     -m "$OUT" --split_dir "$SPLIT_DIR" --skip_train \
     --modality visibility \
     --scores_path "$OUT/uncertainty/visibility.npz" \
-    --score_key visibility_log
+    --score_key uncertainty_log
 
 # 7. Conformal prediction for every modality
 echo "[8/8] Conformal prediction across modalities"
@@ -117,6 +117,9 @@ for MOD in color depth entropy sensitivity visibility; do
 done
 
 # 8. Aggregate
+echo "[done] Exporting active-learning rankings"
+python scripts/export_active_learning_rankings.py --run_dir "$RUN_DIR"
+
 echo "[done] Aggregating results"
 python scripts/aggregate_results.py --run_dir "$RUN_DIR"
 

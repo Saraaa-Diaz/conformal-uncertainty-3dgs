@@ -8,7 +8,7 @@ standard *outer-product* Fisher approximation, summing rank-1 contributions
 across training views.
 
 Per Gaussian i, parameters theta_i = [xyz_i (3), scaling_i (3)] in R^6:
-  F_i = sum_{view} g_i^v (g_i^v)^T   with  g_i^v = grad_{theta_i} L(view)
+  F_i = mean_{view} g_i^v (g_i^v)^T   with  g_i^v = grad_{theta_i} L(view)
   fishers_log_dets[i] = sum_j log(svd(F_i)_j + lambda)
 
 Note: pure-rank-1 per view; with V > 6 training views and >100 typical, the
@@ -117,6 +117,11 @@ def main():
         # Rank-1 outer product per Gaussian, accumulate.
         fishers.add_(g.unsqueeze(2) * g.unsqueeze(1))
 
+    # Normalize by the number of training views so Fisher scores are comparable
+    # across runs/scenes with different view counts.
+    fishers_raw = fishers
+    fishers = fishers_raw / float(len(train_views))
+
     # log-det via singular values: log_det(F) = sum_j log(sv_j).
     # Add lambda_reg to stabilize (PUP3DGS does the same).
     fishers_sv = torch.linalg.svdvals(fishers)  # (P, 6), sorted descending
@@ -132,10 +137,12 @@ def main():
         "num_train_views": len(train_views),
         "lambda_reg": args.lambda_reg,
         "lambda_dssim": args.lambda_dssim,
+        "fisher_normalization": "mean_over_train_views",
         "param_names": np.array(["xyz", "scaling"]),
     }
     if args.save_full_fishers:
         save_kwargs["fishers"] = fishers.detach().cpu().numpy().astype(np.float32)
+        save_kwargs["fishers_raw_sum"] = fishers_raw.detach().cpu().numpy().astype(np.float32)
     np.savez_compressed(str(out_path), **save_kwargs)
 
     print(f"Saved Fisher to: {out_path}")

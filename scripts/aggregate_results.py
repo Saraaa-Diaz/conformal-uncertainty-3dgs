@@ -51,30 +51,42 @@ def main():
     lines.append(f"# Conformal results — {run_dir.name}\n")
     lines.append(f"Run dir: `{run_dir}`\n")
     lines.append("")
-    lines.append("| modality | sigma_key | iter | α | target cov | test cov | mean 2u | std 2u | mean per-view AE corr | calib frames | test frames |")
-    lines.append("|---|---|---|---|---|---|---|---|---|---|---|")
+    lines.append("| modality | sigma_key | iter | α | target cov | per-view cov | per-view mean 2u | per-view std 2u | per-view AE corr | per-view AUSE | calib frames | test frames |")
+    lines.append("|---|---|---|---|---|---|---|---|---|---|---|---|")
     for analysis_name, iter_name, metrics in rows:
         modality = metrics.get("modality", "?")
         sigma_key = metrics.get("sigma_key", "?")
         alpha = metrics.get("alpha")
         target = metrics.get("target_coverage")
         cov = metrics.get("test_pixel_coverage")
+        cov_std = metrics.get("test_pixel_coverage_std", 0.0)
         mean_w = metrics.get("test_mean_interval_size")
+        mean_w_std = metrics.get("test_mean_interval_size_std_per_view", 0.0)
         std_w = metrics.get("test_interval_size_std")
+        std_w_std = metrics.get("test_interval_size_std_std_per_view", 0.0)
         corr = metrics.get("mean_per_view_ae_uncertainty_corr")
+        corr_std = metrics.get("std_per_view_ae_uncertainty_corr", 0.0)
+        ause = metrics.get("mean_per_view_ause", 0.0)
+        ause_std = metrics.get("std_per_view_ause", 0.0)
         nc = metrics.get("num_calib_frames")
         nt = metrics.get("num_test_frames")
         lines.append(
-            "| {modality} | {sigma_key} | {it} | {alpha:.2f} | {target:.3f} | {cov:.4f} | {mean_w:.2f} | {std_w:.2f} | {corr:.4f} | {nc} | {nt} |".format(
+            "| {modality} | {sigma_key} | {it} | {alpha:.2f} | {target:.3f} | {cov:.4f}±{cov_std:.4f} | {mean_w:.2f}±{mean_w_std:.2f} | {std_w:.2f}±{std_w_std:.2f} | {corr:.4f}±{corr_std:.4f} | {ause:.4f}±{ause_std:.4f} | {nc} | {nt} |".format(
                 modality=modality,
                 sigma_key=sigma_key,
                 it=iter_name.replace("ours_", ""),
                 alpha=alpha,
                 target=target,
                 cov=cov,
+                cov_std=cov_std,
                 mean_w=mean_w,
+                mean_w_std=mean_w_std,
                 std_w=std_w,
+                std_w_std=std_w_std,
                 corr=corr,
+                corr_std=corr_std,
+                ause=ause,
+                ause_std=ause_std,
                 nc=nc,
                 nt=nt,
             )
@@ -83,9 +95,10 @@ def main():
     lines.append("")
     lines.append("## How to read this")
     lines.append("")
-    lines.append("- **test cov**: empirical pixel-wise coverage on the test set. Should be near `target cov = 1−α`. Below target = under-covered (sigma too small), above = over-covered (sigma loose / wasted budget).")
-    lines.append("- **mean 2u**: average conformal interval width `2·q̂·σ`. Smaller = tighter intervals at the same coverage = better calibration.")
-    lines.append("- **mean per-view AE corr**: per-view Pearson correlation between `|render − gt|` and `2u`, averaged over test views. Higher (positive) = sigma actually tracks the error.")
+    lines.append("- **per-view cov**: empirical coverage computed per test view, then reported as mean±std over views. Should be near `target cov = 1−α`.")
+    lines.append("- **per-view mean 2u**: conformal interval width `2·q̂·σ` computed per view, then reported as mean±std over views. Smaller = tighter intervals at the same coverage.")
+    lines.append("- **per-view AE corr**: per-view Pearson correlation between `|render − gt|` and `2u`, reported as mean±std over views. Higher positive values mean sigma tracks error.")
+    lines.append("- **per-view AUSE**: area under the sparsification error curve per view, reported as mean±std. Lower is better.")
     lines.append("")
     lines.append("**The most useful sigma is the one with the highest AE correlation at the lowest mean width while hitting target coverage.**")
 
