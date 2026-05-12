@@ -1,0 +1,193 @@
+#!/bin/bash
+#SBATCH --partition=gpu_a100
+#SBATCH --gres=gpu:1
+#SBATCH --gpus=1
+#SBATCH --cpus-per-task=8
+#SBATCH --job-name=cv2_al
+#SBATCH --ntasks=1
+#SBATCH --time=24:00:00
+#SBATCH --mem=64000M
+#SBATCH --output=outfiles/al_%A.out
+
+# Active-learning loop for one scene and one acquisition method.
+#
+# Required:
+#   SCENE=/path/to/scene
+#
+# Optional:
+#   AL_ROOT=output/active_learning/<scene_slug>
+#   METHOD=combined          # random|uniform|fisher|pup|sensitivity|color|visibility|combined
+#   SEED=0
+#   ROUNDS=3                # round_00 plus this many acquisition updates
+#   INIT_TRAIN=10%          # count, fraction, or percent string
+#   CALIB=10%
+#   TEST=20%
+#   ADD_K=5
+#   ITERS=7000
+#   ALPHA=0.1
+
+set -eu
+
+if [ -z "${SCENE:-}" ]; then
+    echo "ERROR: set SCENE=/path/to/scene"
+    exit 1
+fi
+
+METHOD="${METHOD:-combined}"
+SEED="${SEED:-0}"
+ROUNDS="${ROUNDS:-3}"
+INIT_TRAIN="${INIT_TRAIN:-10%}"
+CALIB="${CALIB:-10%}"
+TEST="${TEST:-20%}"
+ADD_K="${ADD_K:-5}"
+ITERS="${ITERS:-7000}"
+ALPHA="${ALPHA:-0.1}"
+TARGET_COVERAGE="$(python -c "print(1.0 - float('${ALPHA}'))")"
+AL_ROOT="${AL_ROOT:-output/active_learning/$(basename "$SCENE")}"
+RUN_ROOT="$AL_ROOT/$METHOD/seed_${SEED}"
+
+module purge
+module load 2024
+module load Anaconda3/2024.06-1
+
+if [[ -n "${SLURM_SUBMIT_DIR:-}" ]]; then
+    REPO_ROOT="${SLURM_SUBMIT_DIR}"
+else
+    SCRIPT_DIR="$(cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    REPO_ROOT="$(realpath "${SCRIPT_DIR}/..")"
+fi
+cd "${REPO_ROOT}"
+
+source activate gaussian_splatting
+
+module load 2023
+module load CUDA/12.1.1
+export TORCH_CUDA_ARCH_LIST="8.0"
+
+mkdir -p "$RUN_ROOT" outfiles
+
+echo "================================================================"
+echo "Active learning loop"
+echo "Scene      : $SCENE"
+echo "Root       : $RUN_ROOT"
+echo "Method     : $METHOD"
+echo "Seed       : $SEED"
+echo "Rounds     : $ROUNDS"
+echo "Init train : $INIT_TRAIN"
+echo "Calib/Test : $CALIB / $TEST"
+echo "Add K      : $ADD_K"
+echo "Iterations : $ITERS"
+echo "Alpha      : $ALPHA"
+echo "Start      : $(date)"
+echo "================================================================"
+
+if ! python -c "import diff_gaussian_rasterization, simple_knn, fused_ssim" 2>/dev/null; then
+    echo "[setup] Building submodules ..."
+    pip install --no-build-isolation submodules/diff-gaussian-rasterization
+    pip install --no-build-isolation submodules/simple-knn
+    pip install --no-build-isolation submodules/fused-ssim
+fi
+
+ROUND0_SPLITS="$RUN_ROOT/round_00/splits"
+if [ ! -f "$ROUND0_SPLITS/train.txt" ]; then
+    echo "[init] Creating initial active-learning split"
+    python scripts/active_learning/splits.py init \
+        --source_path "$SCENE" \
+        --images images \
+        --output_dir "$ROUND0_SPLITS" \
+        --seed "$SEED" \
+        --init_train "$INIT_TRAIN" \
+        --calib "$CALIB" \
+        --test "$TEST"
+fi
+
+for ROUND in $(seq 0 "$ROUNDS"); do
+    ROUND_PAD="$(printf "%02d" "$ROUND")"
+    ROUND_OUT="$RUN_ROOT/round_${ROUND_PAD}"
+    SPLIT_DIR="$ROUND_OUT/splits"
+
+    echo "================================================================"
+    echo "[round $ROUND_PAD] output=$ROUND_OUT split=$SPLIT_DIR"
+    echo "================================================================"
+
+    echo "[round $ROUND_PAD] Training"
+    python train.py -s "$SCENE" -m "$ROUND_OUT" --split_dir "$SPLIT_DIR" --iterations "$ITERS" --eval
+
+    echo "[round $ROUND_PAD] Rendering color/depth/entropy"
+    python scripts/render_color.py -m "$ROUND_OUT" --split_dir "$SPLIT_DIR" --skip_train
+    python scripts/render_depth.py -m "$ROUND_OUT" --split_dir "$SPLIT_DIR" --skip_train
+    python scripts/render_entropy.py -m "$ROUND_OUT" --split_dir "$SPLIT_DIR" --skip_train --top_k 4
+
+    echo "[round $ROUND_PAD] Fisher/PUP sensitivity"
+    python scripts/compute_sensitivity.py -m "$ROUND_OUT"
+    python scripts/render_per_gaussian_scalar.py \
+        -m "$ROUND_OUT" --split_dir "$SPLIT_DIR" --skip_train \
+        --modality sensitivity \
+        --scores_path "$ROUND_OUT/uncertainty/fishers.npz" \
+        --score_key fishers_log_dets \
+        --score_transform shift_positive
+
+    echo "[round $ROUND_PAD] Visibility"
+    python scripts/compute_visibility.py -m "$ROUND_OUT"
+    python scripts/render_per_gaussian_scalar.py \
+        -m "$ROUND_OUT" --split_dir "$SPLIT_DIR" --skip_train \
+        --modality visibility \
+        --scores_path "$ROUND_OUT/uncertainty/visibility.npz" \
+        --score_key uncertainty_log
+
+    echo "[round $ROUND_PAD] Conformal metrics"
+    for MOD in color depth entropy sensitivity visibility; do
+        python scripts/conformal_prediction.py \
+            --run_dir "$ROUND_OUT" \
+            --modality "$MOD" \
+            --alpha "$ALPHA" \
+            --calib_sample_ratio 0.1
+    done
+
+    echo "[round $ROUND_PAD] Image metrics"
+    python metrics.py -m "$ROUND_OUT"
+
+    echo "[round $ROUND_PAD] Aggregation"
+    python scripts/aggregate_results.py --run_dir "$ROUND_OUT"
+
+    echo "[round $ROUND_PAD] Candidate rankings"
+    python scripts/active_learning/export_rankings.py --run_dir "$ROUND_OUT" --splits candidate
+
+    if [ "$ROUND" -lt "$ROUNDS" ]; then
+        NEXT_ROUND=$((ROUND + 1))
+        NEXT_PAD="$(printf "%02d" "$NEXT_ROUND")"
+        NEXT_SPLITS="$RUN_ROOT/round_${NEXT_PAD}/splits"
+        RANKINGS="$ROUND_OUT/active_learning/ours_${ITERS}/view_rankings.json"
+
+        echo "[round $ROUND_PAD] Selecting next $ADD_K views for round_$NEXT_PAD"
+        if [ "$METHOD" = "random" ] || [ "$METHOD" = "uniform" ]; then
+            python scripts/active_learning/splits.py update \
+                --input_dir "$SPLIT_DIR" \
+                --output_dir "$NEXT_SPLITS" \
+                --method "$METHOD" \
+                --add_k "$ADD_K" \
+                --round "$ROUND" \
+                --seed "$SEED"
+        else
+            python scripts/active_learning/splits.py update \
+                --input_dir "$SPLIT_DIR" \
+                --output_dir "$NEXT_SPLITS" \
+                --method "$METHOD" \
+                --rankings_path "$RANKINGS" \
+                --add_k "$ADD_K" \
+                --round "$ROUND" \
+                --seed "$SEED"
+        fi
+    fi
+done
+
+echo "[done] Aggregating active-learning root"
+python scripts/active_learning/aggregate.py --al_root "$AL_ROOT"
+
+echo "[done] Plotting active-learning curves"
+python scripts/active_learning/plot.py --al_root "$AL_ROOT" --coverage_target "$TARGET_COVERAGE"
+
+echo "================================================================"
+echo "Active-learning loop complete: $RUN_ROOT"
+echo "End: $(date)"
+echo "================================================================"

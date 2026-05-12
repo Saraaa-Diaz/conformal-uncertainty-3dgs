@@ -26,7 +26,7 @@ def find_iteration(run_dir, iteration):
     if iteration != -1:
         return iteration
     candidates = []
-    for split in ("train", "calib", "test"):
+    for split in ("train", "calib", "test", "candidate"):
         split_dir = run_dir / split
         if not split_dir.exists():
             continue
@@ -135,7 +135,7 @@ def main():
     parser = argparse.ArgumentParser(description="Export active-learning per-view signal rankings")
     parser.add_argument("--run_dir", required=True, type=str)
     parser.add_argument("--iteration", default=-1, type=int)
-    parser.add_argument("--splits", nargs="+", default=["calib", "test"], choices=["train", "calib", "test"])
+    parser.add_argument("--splits", nargs="+", default=["calib", "test"], choices=["train", "calib", "test", "candidate"])
     parser.add_argument("--out_dir", default=None, type=str)
     parser.add_argument("--color_key", default=DEFAULT_SIGMA_KEYS["color"], type=str)
     parser.add_argument("--sensitivity_key", default=DEFAULT_SIGMA_KEYS["sensitivity"], type=str)

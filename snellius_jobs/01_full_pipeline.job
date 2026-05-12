@@ -25,22 +25,21 @@ ITERS="${ITERS:-30000}"
 ALPHA="${ALPHA:-0.1}"
 
 module purge
-module load 2024
-module load Anaconda3/2024.06-1
+module load 2025
+module load Anaconda3/2025.06-1
 
-if [[ -n "${SLURM_SUBMIT_DIR:-}" ]]; then
-    REPO_ROOT="${SLURM_SUBMIT_DIR}"
-else
-    SCRIPT_DIR="$(cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    REPO_ROOT="$(realpath "${SCRIPT_DIR}/..")"
-fi
-cd "${REPO_ROOT}"
-
-source activate gaussian_splatting
-
-module load 2023
-module load CUDA/12.1.1
+module load CUDA/12.9.1
+export CUDA_HOME=$CUDA_ROOT
 export TORCH_CUDA_ARCH_LIST="8.0"
+
+cd $HOME/conformal-uncertainty-3dgs
+
+# Properly initialize conda for non-interactive bash
+# Temporarily disable 'set -u' to avoid unbound variable errors in conda activation
+set +u
+eval "$(conda shell.bash hook)"
+conda activate gaussian_splatting
+set -u
 
 SPLIT_DIR="$OUT/splits"
 RUN_DIR="$OUT"
@@ -56,13 +55,8 @@ echo "Host       : $(hostname)"
 echo "Start      : $(date)"
 echo "================================================================"
 
-# Build/refresh extensions if missing.
-if ! python -c "import diff_gaussian_rasterization, simple_knn, fused_ssim" 2>/dev/null; then
-    echo "[setup] Building submodules ..."
-    pip install --no-build-isolation submodules/diff-gaussian-rasterization
-    pip install --no-build-isolation submodules/simple-knn
-    pip install --no-build-isolation submodules/fused-ssim
-fi
+# Skip pip install for submodules - they're pre-installed in the conda environment
+# If needed, they can be reinstalled with: pip install --no-build-isolation submodules/NAME
 
 # 1. Round-robin train/calib/test split
 echo "[1/8] Preparing split manifests"
@@ -118,7 +112,7 @@ done
 
 # 8. Aggregate
 echo "[done] Exporting active-learning rankings"
-python scripts/export_active_learning_rankings.py --run_dir "$RUN_DIR"
+python scripts/active_learning/export_rankings.py --run_dir "$RUN_DIR"
 
 echo "[done] Aggregating results"
 python scripts/aggregate_results.py --run_dir "$RUN_DIR"

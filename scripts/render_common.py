@@ -69,8 +69,11 @@ def load_split_manifest(split_dir):
         return {}
     split_dir = os.path.abspath(split_dir)
     split_map = {}
-    for split_name in ("train", "calib", "test"):
+    for split_name in ("train", "calib", "test", "candidate"):
         split_path = os.path.join(split_dir, f"{split_name}.txt")
+        if split_name == "candidate" and not os.path.exists(split_path):
+            split_map[split_name] = []
+            continue
         if not os.path.exists(split_path):
             raise FileNotFoundError(f"Missing split file: {split_path}")
         with open(split_path, "r") as handle:
@@ -110,6 +113,9 @@ def select_views(scene, split_map, args):
         selected["calib"] = [test_views_by_name[name] for name in split_map["calib"] if name in test_views_by_name]
     if not args.skip_test:
         selected["test"] = [test_views_by_name[name] for name in split_map["test"] if name in test_views_by_name]
+    candidate_names = split_map.get("candidate", [])
+    if candidate_names and not args.skip_test:
+        selected["candidate"] = [test_views_by_name[name] for name in candidate_names if name in test_views_by_name]
     return {split_name: views for split_name, views in selected.items() if views}
 
 

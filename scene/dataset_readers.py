@@ -144,6 +144,8 @@ def storePly(path, xyz, rgb):
 
 def _load_split_names(split_dir, split_name):
     split_path = os.path.join(split_dir, f"{split_name}.txt")
+    if split_name == "candidate" and not os.path.exists(split_path):
+        return []
     with open(split_path, "r") as handle:
         names = [line.strip() for line in handle if line.strip()]
     return names
@@ -188,8 +190,9 @@ def readColmapSceneInfo(path, images, depths, eval, train_test_exp, split_dir=""
         train_split_names = _load_split_names(split_dir, "train")
         calib_split_names = _load_split_names(split_dir, "calib")
         test_split_names = _load_split_names(split_dir, "test")
-        split_name_union = set(train_split_names) | set(calib_split_names) | set(test_split_names)
-        test_cam_names_list = sorted(set(calib_split_names) | set(test_split_names))
+        candidate_split_names = _load_split_names(split_dir, "candidate")
+        split_name_union = set(train_split_names) | set(calib_split_names) | set(test_split_names) | set(candidate_split_names)
+        test_cam_names_list = sorted(set(calib_split_names) | set(test_split_names) | set(candidate_split_names))
     elif eval:
         if "360" in path:
             llffhold = 8
