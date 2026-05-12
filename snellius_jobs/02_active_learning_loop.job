@@ -80,12 +80,15 @@ echo "Alpha      : $ALPHA"
 echo "Start      : $(date)"
 echo "================================================================"
 
-if ! python -c "import diff_gaussian_rasterization, simple_knn, fused_ssim" 2>/dev/null; then
-    echo "[setup] Building submodules ..."
-    pip install --no-build-isolation submodules/diff-gaussian-rasterization
-    pip install --no-build-isolation submodules/simple-knn
-    pip install --no-build-isolation submodules/fused-ssim
-fi
+# Skip pip install for submodules - they're pre-installed in the conda environment
+# If needed, they can be reinstalled with: pip install --no-build-isolation submodules/NAME
+
+# if ! python -c "import diff_gaussian_rasterization, simple_knn, fused_ssim" 2>/dev/null; then
+#     echo "[setup] Building submodules ..."
+#     pip install --no-build-isolation submodules/diff-gaussian-rasterization
+#     pip install --no-build-isolation submodules/simple-knn
+#     pip install --no-build-isolation submodules/fused-ssim
+# fi
 
 ROUND0_SPLITS="$RUN_ROOT/round_00/splits"
 if [ ! -f "$ROUND0_SPLITS/train.txt" ]; then

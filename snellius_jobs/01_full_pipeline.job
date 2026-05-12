@@ -58,6 +58,13 @@ echo "================================================================"
 # Skip pip install for submodules - they're pre-installed in the conda environment
 # If needed, they can be reinstalled with: pip install --no-build-isolation submodules/NAME
 
+# if ! python -c "import diff_gaussian_rasterization, simple_knn, fused_ssim" 2>/dev/null; then
+#     echo "[setup] Building submodules ..."
+#     pip install --no-build-isolation submodules/diff-gaussian-rasterization
+#     pip install --no-build-isolation submodules/simple-knn
+#     pip install --no-build-isolation submodules/fused-ssim
+# fi
+
 # 1. Round-robin train/calib/test split
 echo "[1/8] Preparing split manifests"
 python scripts/prepare_round_robin_split.py \
