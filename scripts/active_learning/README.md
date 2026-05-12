@@ -142,6 +142,12 @@ ITERS=7000 \
 sbatch snellius_jobs/02_active_learning_loop.job
 ```
 
+Each method renders only the signal it needs. For example,
+`conformal_color` renders color only, `raw_sensitivity` renders Fisher
+sensitivity only, and `conformal_visibility` renders visibility only. Depth and
+entropy are not rendered in the active-learning loop unless a future method is
+added that uses them.
+
 ## Outputs
 
 Per method/seed/round:

@@ -45,6 +45,31 @@ ALPHA="${ALPHA:-0.1}"
 TARGET_COVERAGE="$(python -c "print(1.0 - float('${ALPHA}'))")"
 AL_ROOT="${AL_ROOT:-output/active_learning/$(basename "$SCENE")}"
 RUN_ROOT="$AL_ROOT/$METHOD/seed_${SEED}"
+NEED_COLOR=0
+NEED_SENSITIVITY=0
+NEED_VISIBILITY=0
+case "$METHOD" in
+    random|uniform)
+        ;;
+    conformal_color|raw_color|color)
+        NEED_COLOR=1
+        ;;
+    conformal_visibility|raw_visibility|visibility)
+        NEED_VISIBILITY=1
+        ;;
+    conformal_sensitivity|raw_sensitivity|sensitivity|fisher|pup)
+        NEED_SENSITIVITY=1
+        ;;
+    conformal_combined|raw_combined|combined)
+        NEED_COLOR=1
+        NEED_SENSITIVITY=1
+        NEED_VISIBILITY=1
+        ;;
+    *)
+        echo "ERROR: unknown METHOD=$METHOD"
+        exit 1
+        ;;
+esac
 
 module purge
 module load 2025
@@ -77,6 +102,7 @@ echo "Calib/Test : $CALIB / $TEST"
 echo "Add K      : $ADD_K"
 echo "Iterations : $ITERS"
 echo "Alpha      : $ALPHA"
+echo "Signals    : color=$NEED_COLOR sensitivity=$NEED_SENSITIVITY visibility=$NEED_VISIBILITY"
 echo "Start      : $(date)"
 echo "================================================================"
 
@@ -107,6 +133,7 @@ for ROUND in $(seq 0 "$ROUNDS"); do
     ROUND_PAD="$(printf "%02d" "$ROUND")"
     ROUND_OUT="$RUN_ROOT/round_${ROUND_PAD}"
     SPLIT_DIR="$ROUND_OUT/splits"
+    OUTPUT_ROOT="$(dirname "$ROUND_OUT")"
 
     echo "================================================================"
     echo "[round $ROUND_PAD] output=$ROUND_OUT split=$SPLIT_DIR"
@@ -115,36 +142,54 @@ for ROUND in $(seq 0 "$ROUNDS"); do
     echo "[round $ROUND_PAD] Training"
     python train.py -s "$SCENE" -m "$ROUND_OUT" --split_dir "$SPLIT_DIR" --iterations "$ITERS" --eval
 
-    echo "[round $ROUND_PAD] Rendering color/depth/entropy"
-    python scripts/render_color.py -m "$ROUND_OUT" --split_dir "$SPLIT_DIR" --skip_train
-    python scripts/render_depth.py -m "$ROUND_OUT" --split_dir "$SPLIT_DIR" --skip_train
-    python scripts/render_entropy.py -m "$ROUND_OUT" --split_dir "$SPLIT_DIR" --skip_train --top_k 4
+    if [ "$NEED_COLOR" -eq 1 ]; then
+        echo "[round $ROUND_PAD] Rendering color"
+        python scripts/render_color.py -m "$ROUND_OUT" --split_dir "$SPLIT_DIR" --output_root "$OUTPUT_ROOT" --skip_train
+    fi
 
-    echo "[round $ROUND_PAD] Fisher/PUP sensitivity"
-    python scripts/compute_sensitivity.py -m "$ROUND_OUT"
-    python scripts/render_per_gaussian_scalar.py \
-        -m "$ROUND_OUT" --split_dir "$SPLIT_DIR" --skip_train \
-        --modality sensitivity \
-        --scores_path "$ROUND_OUT/uncertainty/fishers.npz" \
-        --score_key fishers_log_dets \
-        --score_transform shift_positive
+    if [ "$NEED_SENSITIVITY" -eq 1 ]; then
+        echo "[round $ROUND_PAD] Fisher/PUP-style sensitivity"
+        python scripts/compute_sensitivity.py -m "$ROUND_OUT"
+        python scripts/render_per_gaussian_scalar.py \
+            -m "$ROUND_OUT" --split_dir "$SPLIT_DIR" --output_root "$OUTPUT_ROOT" --skip_train \
+            --modality sensitivity \
+            --scores_path "$ROUND_OUT/uncertainty/fishers.npz" \
+            --score_key fishers_log_dets \
+            --score_transform shift_positive
+    fi
 
-    echo "[round $ROUND_PAD] Visibility"
-    python scripts/compute_visibility.py -m "$ROUND_OUT"
-    python scripts/render_per_gaussian_scalar.py \
-        -m "$ROUND_OUT" --split_dir "$SPLIT_DIR" --skip_train \
-        --modality visibility \
-        --scores_path "$ROUND_OUT/uncertainty/visibility.npz" \
-        --score_key uncertainty_log
+    if [ "$NEED_VISIBILITY" -eq 1 ]; then
+        echo "[round $ROUND_PAD] Visibility"
+        python scripts/compute_visibility.py -m "$ROUND_OUT"
+        python scripts/render_per_gaussian_scalar.py \
+            -m "$ROUND_OUT" --split_dir "$SPLIT_DIR" --output_root "$OUTPUT_ROOT" --skip_train \
+            --modality visibility \
+            --scores_path "$ROUND_OUT/uncertainty/visibility.npz" \
+            --score_key uncertainty_log
+    fi
 
     echo "[round $ROUND_PAD] Conformal metrics"
-    for MOD in color depth entropy sensitivity visibility; do
+    if [ "$NEED_COLOR" -eq 1 ]; then
         python scripts/conformal_prediction.py \
             --run_dir "$ROUND_OUT" \
-            --modality "$MOD" \
+            --modality color \
             --alpha "$ALPHA" \
             --calib_sample_ratio 0.1
-    done
+    fi
+    if [ "$NEED_SENSITIVITY" -eq 1 ]; then
+        python scripts/conformal_prediction.py \
+            --run_dir "$ROUND_OUT" \
+            --modality sensitivity \
+            --alpha "$ALPHA" \
+            --calib_sample_ratio 0.1
+    fi
+    if [ "$NEED_VISIBILITY" -eq 1 ]; then
+        python scripts/conformal_prediction.py \
+            --run_dir "$ROUND_OUT" \
+            --modality visibility \
+            --alpha "$ALPHA" \
+            --calib_sample_ratio 0.1
+    fi
 
     echo "[round $ROUND_PAD] Image metrics"
     python metrics.py -m "$ROUND_OUT"
@@ -158,7 +203,10 @@ for ROUND in $(seq 0 "$ROUNDS"); do
         --splits candidate \
         --alpha "$ALPHA" \
         --seed "$SEED" \
-        --acquisition_mode both
+        --acquisition_mode both \
+        $( [ "$NEED_COLOR" -eq 1 ] || printf '%s' '--skip_color ' ) \
+        $( [ "$NEED_SENSITIVITY" -eq 1 ] || printf '%s' '--skip_sensitivity ' ) \
+        $( [ "$NEED_VISIBILITY" -eq 1 ] || printf '%s' '--skip_visibility ' )
 
     if [ "$ROUND" -lt "$ROUNDS" ]; then
         NEXT_ROUND=$((ROUND + 1))

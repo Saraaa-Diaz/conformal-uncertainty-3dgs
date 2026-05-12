@@ -206,6 +206,9 @@ def main():
     parser.add_argument("--color_key", default=DEFAULT_SIGMA_KEYS["color"], type=str)
     parser.add_argument("--sensitivity_key", default=DEFAULT_SIGMA_KEYS["sensitivity"], type=str)
     parser.add_argument("--visibility_key", default=DEFAULT_SIGMA_KEYS["visibility"], type=str)
+    parser.add_argument("--skip_color", action="store_true")
+    parser.add_argument("--skip_sensitivity", action="store_true")
+    parser.add_argument("--skip_visibility", action="store_true")
     args = parser.parse_args()
 
     run_dir = Path(args.run_dir).resolve()
@@ -213,11 +216,13 @@ def main():
     out_dir = Path(args.out_dir) if args.out_dir else run_dir / "active_learning" / f"ours_{iteration}"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    sigma_keys = {
-        "color": args.color_key,
-        "sensitivity": args.sensitivity_key,
-        "visibility": args.visibility_key,
-    }
+    sigma_keys = {}
+    if not args.skip_color:
+        sigma_keys["color"] = args.color_key
+    if not args.skip_sensitivity:
+        sigma_keys["sensitivity"] = args.sensitivity_key
+    if not args.skip_visibility:
+        sigma_keys["visibility"] = args.visibility_key
     qhats = {}
     if args.acquisition_mode in ("both", "conformal"):
         for modality, key in sigma_keys.items():
