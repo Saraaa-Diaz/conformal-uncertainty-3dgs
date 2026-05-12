@@ -86,10 +86,13 @@ The AL loop's `METHOD=combined` uses `combined_mean`.
 
 ## Running On Snellius
 
-Run default AL jobs for all four scenes:
+Run default AL jobs for one scene:
 
 ```bash
-./snellius_jobs/submit_active_learning_four_scenes.sh
+./snellius_jobs/submit_active_learning_db_drjohnson.sh
+./snellius_jobs/submit_active_learning_db_playroom.sh
+./snellius_jobs/submit_active_learning_tandt_train.sh
+./snellius_jobs/submit_active_learning_tandt_truck.sh
 ```
 
 Defaults:
@@ -104,7 +107,7 @@ METHODS="random fisher color visibility combined"
 Run a fuller comparison:
 
 ```bash
-ITERS=30000 ROUNDS=5 ADD_K=10 METHODS="random uniform fisher color visibility combined" ./snellius_jobs/submit_active_learning_four_scenes.sh
+ITERS=30000 ROUNDS=5 ADD_K=10 METHODS="random uniform fisher color visibility combined" ./snellius_jobs/submit_active_learning_tandt_train.sh
 ```
 
 Run one scene and one method manually:
