@@ -9,7 +9,7 @@ INIT_TRAIN="${INIT_TRAIN:-10%}"
 CALIB="${CALIB:-10%}"
 TEST="${TEST:-20%}"
 ADD_K="${ADD_K:-5}"
-METHODS="${METHODS:-random fisher color visibility combined}"
+METHODS="${METHODS:-conformal_color conformal_visibility conformal_sensitivity raw_sensitivity}"
 SCENE="${SCENE:-tandt/truck}"
 AL_ROOT="${AL_ROOT:-output/active_learning/tandt_truck}"
 

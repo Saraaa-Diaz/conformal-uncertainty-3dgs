@@ -41,32 +41,51 @@ candidate views are appended to `train.txt` and removed from `candidate.txt`.
 `splits.py update --method ...` supports:
 
 ```text
-random       random candidate views
-uniform      evenly spaced candidate views in sorted image order
-fisher       PUP/Fisher baseline, using sensitivity_mean
-pup          alias for fisher
-sensitivity  alias for fisher, useful for signal ablation naming
-color        color_mean
-visibility   visibility_mean
-combined     combined_mean
+random                  random candidate views
+uniform                 evenly spaced candidate views in sorted image order
+conformal_color         color mean conformal interval width
+conformal_visibility    visibility mean conformal interval width
+conformal_sensitivity   sensitivity mean conformal interval width
+conformal_combined      min-max normalized conformal color/visibility/sensitivity average
+raw_sensitivity         raw rendered Fisher/sensitivity mean
+raw_color               raw rendered color uncertainty mean
+raw_visibility          raw rendered visibility uncertainty mean
+raw_combined            min-max normalized raw color/visibility/sensitivity average
+fisher, pup             aliases for raw_sensitivity
+color, visibility       aliases for conformal_color/conformal_visibility
+sensitivity             alias for conformal_sensitivity
+combined                alias for conformal_combined
 ```
 
-The PUP/Fisher baseline follows the PUP 3D-GS idea of ranking by Fisher
-sensitivity over Gaussian xyz+scaling parameters. In this repo the per-view
-candidate score is obtained by rendering the per-Gaussian Fisher log-det signal
-into candidate views and averaging the resulting sensitivity map.
+The raw sensitivity baseline is PUP-style Fisher acquisition: it ranks by the
+mean rendered Fisher/sensitivity map. The conformal sensitivity method instead
+uses calibration views to estimate `q_hat`, then ranks candidate views by mean
+`2*q_hat*sigma`.
 
 ## Combination Rule
 
-`export_rankings.py` computes per-view signal statistics over valid pixels:
+`export_rankings.py` computes both raw and conformal per-view statistics over
+valid candidate pixels:
 
 ```text
-color_mean
-sensitivity_mean
-visibility_mean
+color_raw_mean
+sensitivity_raw_mean
+visibility_raw_mean
+color_conformal_mean_2u
+sensitivity_conformal_mean_2u
+visibility_conformal_mean_2u
 ```
 
-For each AL round, it min-max normalizes each available signal across the
+Conformal scores use calibration views only:
+
+```text
+q_hat = conformal quantile(|render - gt| / sigma on calib)
+candidate_score = mean(2 * q_hat * sigma_candidate)
+```
+
+Candidate GT is not used for acquisition.
+
+For combined methods, each available signal is min-max normalized across the
 candidate views for that round:
 
 ```text
@@ -78,11 +97,11 @@ If a signal is constant across candidates, its normalized values are set to 0.
 The exported combined scores are:
 
 ```text
-combined_mean(view) = mean(norm_color, norm_sensitivity, norm_visibility)
-combined_max(view)  = max(norm_color, norm_sensitivity, norm_visibility)
+raw_combined_mean(view) = mean(norm_raw_color, norm_raw_sensitivity, norm_raw_visibility)
+conformal_combined_mean(view) = mean(norm_conf_color, norm_conf_sensitivity, norm_conf_visibility)
 ```
 
-The AL loop's `METHOD=combined` uses `combined_mean`.
+The AL loop's `METHOD=combined` is an alias for `conformal_combined`.
 
 ## Running On Snellius
 
@@ -101,13 +120,13 @@ Defaults:
 ITERS=7000
 ROUNDS=3
 ADD_K=5
-METHODS="random fisher color visibility combined"
+METHODS="conformal_color conformal_visibility conformal_sensitivity raw_sensitivity"
 ```
 
 Run a fuller comparison:
 
 ```bash
-ITERS=30000 ROUNDS=5 ADD_K=10 METHODS="random uniform fisher color visibility combined" ./snellius_jobs/submit_active_learning_tandt_train.sh
+ITERS=30000 ROUNDS=5 ADD_K=10 METHODS="conformal_color conformal_visibility conformal_sensitivity raw_sensitivity" ./snellius_jobs/submit_active_learning_tandt_train.sh
 ```
 
 Run one scene and one method manually:
@@ -115,7 +134,7 @@ Run one scene and one method manually:
 ```bash
 SCENE=tandt/train \
 AL_ROOT=output/active_learning/tandt_train \
-METHOD=combined \
+METHOD=conformal_color \
 SEED=0 \
 ROUNDS=3 \
 ADD_K=5 \

@@ -153,7 +153,12 @@ for ROUND in $(seq 0 "$ROUNDS"); do
     python scripts/aggregate_results.py --run_dir "$ROUND_OUT"
 
     echo "[round $ROUND_PAD] Candidate rankings"
-    python scripts/active_learning/export_rankings.py --run_dir "$ROUND_OUT" --splits candidate
+    python scripts/active_learning/export_rankings.py \
+        --run_dir "$ROUND_OUT" \
+        --splits candidate \
+        --alpha "$ALPHA" \
+        --seed "$SEED" \
+        --acquisition_mode both
 
     if [ "$ROUND" -lt "$ROUNDS" ]; then
         NEXT_ROUND=$((ROUND + 1))

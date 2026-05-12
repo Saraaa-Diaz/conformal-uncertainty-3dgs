@@ -10,11 +10,10 @@ The split layout is:
 Selection methods:
   random      random candidate views
   uniform     evenly spaced candidate views in image order
-  fisher      PUP-style Fisher baseline, using sensitivity_mean
-  sensitivity same as fisher, named for signal-level ablations
-  color       color_mean
-  visibility  visibility_mean
-  combined    combined_mean
+  conformal_color       color conformal mean interval width
+  conformal_visibility  visibility conformal mean interval width
+  conformal_sensitivity sensitivity conformal mean interval width
+  raw_sensitivity       PUP-style raw Fisher/sensitivity baseline
 """
 
 import argparse
@@ -25,12 +24,20 @@ import numpy as np
 
 
 ACQUISITION_KEYS = {
-    "fisher": "sensitivity_mean",
-    "pup": "sensitivity_mean",
-    "sensitivity": "sensitivity_mean",
-    "color": "color_mean",
-    "visibility": "visibility_mean",
-    "combined": "combined_mean",
+    "fisher": "raw_sensitivity",
+    "pup": "raw_sensitivity",
+    "raw_sensitivity": "raw_sensitivity",
+    "raw_color": "raw_color",
+    "raw_visibility": "raw_visibility",
+    "raw_combined": "raw_combined",
+    "sensitivity": "conformal_sensitivity",
+    "color": "conformal_color",
+    "visibility": "conformal_visibility",
+    "combined": "conformal_combined",
+    "conformal_sensitivity": "conformal_sensitivity",
+    "conformal_color": "conformal_color",
+    "conformal_visibility": "conformal_visibility",
+    "conformal_combined": "conformal_combined",
 }
 
 
@@ -218,7 +225,28 @@ def main():
     update = sub.add_parser("update")
     update.add_argument("--input_dir", required=True)
     update.add_argument("--output_dir", required=True)
-    update.add_argument("--method", required=True, choices=["random", "uniform", "fisher", "pup", "sensitivity", "color", "visibility", "combined"])
+    update.add_argument(
+        "--method",
+        required=True,
+        choices=[
+            "random",
+            "uniform",
+            "fisher",
+            "pup",
+            "sensitivity",
+            "color",
+            "visibility",
+            "combined",
+            "raw_sensitivity",
+            "raw_color",
+            "raw_visibility",
+            "raw_combined",
+            "conformal_sensitivity",
+            "conformal_color",
+            "conformal_visibility",
+            "conformal_combined",
+        ],
+    )
     update.add_argument("--rankings_path", default="")
     update.add_argument("--add_k", type=int, default=5)
     update.add_argument("--round", type=int, required=True)
