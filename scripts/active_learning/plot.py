@@ -64,6 +64,19 @@ def group_uncertainty_rows(rows, modality):
     return [row for row in rows if row.get("modality") == modality]
 
 
+def group_acquisition_uncertainty_rows(rows):
+    # One uncertainty point per method/seed/round, using the modality evaluated
+    # for that method. This makes the requested single "uncertainty vs views"
+    # diagram across acquisition methods.
+    by_key = {}
+    for row in rows:
+        if row.get("mean_2u") is None:
+            continue
+        key = (row["method"], row["seed"], row["round"], row["train_views"])
+        by_key.setdefault(key, row)
+    return list(by_key.values())
+
+
 def series_by_method(rows, metric):
     grouped = defaultdict(lambda: defaultdict(list))
     x_by_round = {}
@@ -111,6 +124,69 @@ def plot_metric(rows, metric, title, ylabel, out_path, target=None):
     return True
 
 
+def plot_psnr_with_interval_width(rows, out_path):
+    psnr_rows = group_image_rows(rows)
+    uncertainty_rows = group_acquisition_uncertainty_rows(rows)
+    psnr_series = series_by_method(psnr_rows, "psnr")
+    width_series = series_by_method(uncertainty_rows, "mean_2u")
+    if not psnr_series:
+        return False
+
+    fig, ax_psnr = plt.subplots(figsize=(8.0, 5.2))
+    ax_width = ax_psnr.twinx()
+
+    color_cycle = plt.rcParams["axes.prop_cycle"].by_key().get("color", [])
+    methods = sorted(psnr_series)
+    method_colors = {
+        method: color_cycle[idx % len(color_cycle)] if color_cycle else None
+        for idx, method in enumerate(methods)
+    }
+
+    psnr_handles = []
+    width_handles = []
+    for method in methods:
+        xs, ys, yerr = psnr_series[method]
+        color = method_colors[method]
+        handle = ax_psnr.errorbar(
+            xs,
+            ys,
+            yerr=yerr,
+            marker="o",
+            linewidth=2,
+            capsize=3,
+            color=color,
+            label=f"{method} PSNR",
+        )
+        psnr_handles.append(handle)
+
+        if method in width_series:
+            wx, wy, _ = width_series[method]
+            ax_width.fill_between(wx, wy, [0.0] * len(wy), color=color, alpha=0.10)
+            width_line = ax_width.plot(
+                wx,
+                wy,
+                linestyle="--",
+                linewidth=1.5,
+                color=color,
+                alpha=0.75,
+                label=f"{method} mean 2u",
+            )[0]
+            width_handles.append(width_line)
+
+    ax_psnr.set_xlabel("Training views")
+    ax_psnr.set_ylabel("PSNR (dB)")
+    ax_width.set_ylabel("Mean interval width (2u)")
+    ax_psnr.set_title("PSNR vs Training Views with Interval Width")
+    ax_psnr.grid(True, alpha=0.25)
+    handles = [h[0] if hasattr(h, "__getitem__") else h for h in psnr_handles] + width_handles
+    labels = [handle.get_label() for handle in handles]
+    ax_psnr.legend(handles, labels, fontsize=8, loc="best")
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=180)
+    plt.close(fig)
+    return True
+
+
 def main():
     parser = argparse.ArgumentParser(description="Plot active-learning learning curves")
     parser.add_argument("--al_root", required=True)
@@ -134,6 +210,10 @@ def main():
         if plot_metric(image_rows, metric, f"{title} vs Training Views", ylabel, out_path):
             written.append(out_path)
 
+    out_path = out_dir / "psnr_vs_train_views_interval_width.png"
+    if plot_psnr_with_interval_width(rows, out_path):
+        written.append(out_path)
+
     for modality in args.modalities:
         modality_rows = group_uncertainty_rows(rows, modality)
         if not modality_rows:
@@ -143,6 +223,11 @@ def main():
             out_path = out_dir / f"{modality}_{metric}_vs_train_views.png"
             if plot_metric(modality_rows, metric, f"{modality}: {title} vs Training Views", ylabel, out_path, target=target):
                 written.append(out_path)
+
+    uncertainty_rows = group_acquisition_uncertainty_rows(rows)
+    out_path = out_dir / "uncertainty_vs_train_views.png"
+    if plot_metric(uncertainty_rows, "mean_2u", "Uncertainty vs Training Views", "mean 2u", out_path):
+        written.append(out_path)
 
     print(f"Wrote {len(written)} figures to {out_dir}")
     for path in written:
