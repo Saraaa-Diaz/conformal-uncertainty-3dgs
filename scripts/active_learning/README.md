@@ -1,8 +1,21 @@
 # Active Learning Pipeline
 
 This folder contains the active-learning utilities. They are separate from the
-basic uncertainty pipeline so AL runs can write to `output/active_learning/...`
+basic uncertainty pipeline so AL runs can write to `$OUTPUT_BASE/active_learning/...`
 without overwriting standard runs.
+
+On Snellius, the submit scripts default to scratch storage to avoid home/project
+quota issues:
+
+```text
+OUTPUT_BASE=/scratch-shared/$USER/output
+```
+
+You can override this per run:
+
+```bash
+OUTPUT_BASE=/scratch-shared/$USER/my_outputs DATASET_NAME=garden ./snellius_jobs/submit_mipnerf_popgs20.sh
+```
 
 ## Split Layout
 
@@ -208,8 +221,8 @@ raw_sensitivity
 The final report files are:
 
 ```text
-output/active_learning_mipnerf/<dataset>_popgs10/final_metrics.md
-output/active_learning_mipnerf/<dataset>_popgs20/final_metrics.md
+/scratch-shared/$USER/output/active_learning_mipnerf/<dataset>_popgs10/final_metrics.md
+/scratch-shared/$USER/output/active_learning_mipnerf/<dataset>_popgs20/final_metrics.md
 ```
 
 The main diagrams are:
@@ -242,7 +255,7 @@ Run one scene and one method manually:
 
 ```bash
 SCENE=tandt/train \
-AL_ROOT=output/active_learning/tandt_train \
+AL_ROOT=/scratch-shared/$USER/output/active_learning/tandt_train \
 METHOD=conformal_color \
 SEED=0 \
 ROUNDS=3 \
@@ -262,7 +275,7 @@ added that uses them.
 Per method/seed/round:
 
 ```text
-output/active_learning/<scene>/<method>/seed_<seed>/round_<rr>/
+/scratch-shared/$USER/output/active_learning/<scene>/<method>/seed_<seed>/round_<rr>/
   splits/
   results.md
   results.json
@@ -275,9 +288,9 @@ output/active_learning/<scene>/<method>/seed_<seed>/round_<rr>/
 Scene-level summaries:
 
 ```text
-output/active_learning/<scene>/active_learning_summary.csv
-output/active_learning/<scene>/active_learning_summary.md
-output/active_learning/<scene>/figures/
+/scratch-shared/$USER/output/active_learning/<scene>/active_learning_summary.csv
+/scratch-shared/$USER/output/active_learning/<scene>/active_learning_summary.md
+/scratch-shared/$USER/output/active_learning/<scene>/figures/
 ```
 
 The figures include PSNR/SSIM/LPIPS learning curves and per-modality

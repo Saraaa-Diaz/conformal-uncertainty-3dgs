@@ -20,7 +20,8 @@ if [ -z "${SCENE:-}" ]; then
     exit 1
 fi
 
-OUT="${OUT:-output/$(basename "$SCENE")}"
+OUTPUT_BASE="${OUTPUT_BASE:-/scratch-shared/$USER/output}"
+OUT="${OUT:-$OUTPUT_BASE/$(basename "$SCENE")}"
 ITERS="${ITERS:-30000}"
 ALPHA="${ALPHA:-0.1}"
 
