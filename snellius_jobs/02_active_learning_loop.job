@@ -256,19 +256,27 @@ for ROUND in $(seq 0 "$ROUNDS"); do
     echo "[round $ROUND_PAD] Image metrics"
     python metrics.py -m "$ROUND_OUT"
 
-    echo "[round $ROUND_PAD] Aggregation"
-    python scripts/aggregate_results.py --run_dir "$ROUND_OUT"
+    if [ "$NEED_COLOR" -eq 1 ] || [ "$NEED_SENSITIVITY" -eq 1 ] || [ "$NEED_VISIBILITY" -eq 1 ]; then
+        echo "[round $ROUND_PAD] Aggregation"
+        python scripts/aggregate_results.py --run_dir "$ROUND_OUT"
+    else
+        echo "[round $ROUND_PAD] Skipping conformal aggregation; method has no uncertainty signal"
+    fi
 
-    echo "[round $ROUND_PAD] Candidate rankings"
-    python scripts/active_learning/export_rankings.py \
-        --run_dir "$ROUND_OUT" \
-        --splits candidate \
-        --alpha "$ALPHA" \
-        --seed "$SEED" \
-        --acquisition_mode both \
-        $( [ "$NEED_COLOR" -eq 1 ] || printf '%s' '--skip_color ' ) \
-        $( [ "$NEED_SENSITIVITY" -eq 1 ] || printf '%s' '--skip_sensitivity ' ) \
-        $( [ "$NEED_VISIBILITY" -eq 1 ] || printf '%s' '--skip_visibility ' )
+    if [ "$NEED_COLOR" -eq 1 ] || [ "$NEED_SENSITIVITY" -eq 1 ] || [ "$NEED_VISIBILITY" -eq 1 ]; then
+        echo "[round $ROUND_PAD] Candidate rankings"
+        python scripts/active_learning/export_rankings.py \
+            --run_dir "$ROUND_OUT" \
+            --splits candidate \
+            --alpha "$ALPHA" \
+            --seed "$SEED" \
+            --acquisition_mode both \
+            $( [ "$NEED_COLOR" -eq 1 ] || printf '%s' '--skip_color ' ) \
+            $( [ "$NEED_SENSITIVITY" -eq 1 ] || printf '%s' '--skip_sensitivity ' ) \
+            $( [ "$NEED_VISIBILITY" -eq 1 ] || printf '%s' '--skip_visibility ' )
+    else
+        echo "[round $ROUND_PAD] Skipping candidate rankings; method=$METHOD selects without scores"
+    fi
 
     if [ "$ROUND" -lt "$ROUNDS" ]; then
         NEXT_ROUND=$((ROUND + 1))

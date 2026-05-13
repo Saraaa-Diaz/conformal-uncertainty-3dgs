@@ -50,6 +50,11 @@ def read_rows(path):
     return parsed
 
 
+def method_has_signal(row):
+    modality = row.get("modality")
+    return modality is not None and modality != ""
+
+
 def group_image_rows(rows):
     # Image metrics are repeated once per conformal modality in the summary CSV.
     # Collapse to one point per method/seed/round.
@@ -70,6 +75,8 @@ def group_acquisition_uncertainty_rows(rows):
     # diagram across acquisition methods.
     by_key = {}
     for row in rows:
+        if not method_has_signal(row):
+            continue
         if row.get("mean_2u") is None:
             continue
         key = (row["method"], row["seed"], row["round"], row["train_views"])
@@ -116,6 +123,40 @@ def plot_metric(rows, metric, title, ylabel, out_path, target=None):
     plt.xlabel("Training views")
     plt.ylabel(ylabel)
     plt.title(title)
+    plt.grid(True, alpha=0.25)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=180)
+    plt.close()
+    return True
+
+
+def plot_psnr_with_uncertainty_shading(rows, out_path):
+    psnr_rows = group_image_rows(rows)
+    psnr_series = series_by_method(psnr_rows, "psnr")
+    uncertainty_rows = group_acquisition_uncertainty_rows(rows)
+    width_series = series_by_method(uncertainty_rows, "mean_2u")
+    if not psnr_series:
+        return False
+
+    finite_widths = [val for _, ys, _ in width_series.values() for val in ys if val is not None]
+    width_max = max(finite_widths) if finite_widths else None
+
+    plt.figure(figsize=(8.0, 5.2))
+    color_cycle = plt.rcParams["axes.prop_cycle"].by_key().get("color", [])
+    for idx, (method, (xs, ys, yerr)) in enumerate(sorted(psnr_series.items())):
+        color = color_cycle[idx % len(color_cycle)] if color_cycle else None
+        if method in width_series and width_max and width_max > 0:
+            wx, wy, _ = width_series[method]
+            ymin = min(ys) - 0.25
+            ymax = max(ys) + 0.25
+            shade_top = [ymin + (ymax - ymin) * (val / width_max) for val in wy]
+            plt.fill_between(wx, [ymin] * len(wx), shade_top, color=color, alpha=0.10)
+        plt.errorbar(xs, ys, yerr=yerr, marker="o", linewidth=2, capsize=3, color=color, label=method)
+
+    plt.xlabel("Training views")
+    plt.ylabel("PSNR (dB)")
+    plt.title("PSNR vs Training Views with Interval-Width Shading")
     plt.grid(True, alpha=0.25)
     plt.legend()
     plt.tight_layout()
@@ -212,6 +253,9 @@ def main():
 
     out_path = out_dir / "psnr_vs_train_views_interval_width.png"
     if plot_psnr_with_interval_width(rows, out_path):
+        written.append(out_path)
+    out_path = out_dir / "psnr_vs_train_views_interval_shading.png"
+    if plot_psnr_with_uncertainty_shading(rows, out_path):
         written.append(out_path)
 
     for modality in args.modalities:
