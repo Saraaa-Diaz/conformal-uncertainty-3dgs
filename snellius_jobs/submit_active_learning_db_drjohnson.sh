@@ -1,10 +1,10 @@
 #!/bin/bash
 set -eu
 
-ITERS="${ITERS:-7000}"
+ITERS="${ITERS:-30000}"
 ALPHA="${ALPHA:-0.1}"
 SEED="${SEED:-0}"
-ROUNDS="${ROUNDS:-3}"
+ROUNDS="${ROUNDS:-5}"
 INIT_TRAIN="${INIT_TRAIN:-10%}"
 CALIB="${CALIB:-10%}"
 TEST="${TEST:-20%}"
