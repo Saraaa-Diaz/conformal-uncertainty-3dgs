@@ -7,6 +7,8 @@ Expected layout:
 Writes:
   <al_root>/active_learning_summary.csv
   <al_root>/active_learning_summary.md
+  <al_root>/final_metrics.csv
+  <al_root>/final_metrics.md
 """
 
 import argparse
@@ -147,6 +149,48 @@ def write_markdown(path, rows):
     path.write_text("\n".join(lines) + "\n")
 
 
+def final_image_rows(rows):
+    by_method_seed = {}
+    for row in rows:
+        key = (row.get("method"), row.get("seed"), row.get("round"), row.get("train_views"))
+        by_method_seed.setdefault(key, row)
+
+    latest = {}
+    for (_, _, _, _), row in by_method_seed.items():
+        key = (row.get("method"), row.get("seed"))
+        if key not in latest or row.get("round", -1) > latest[key].get("round", -1):
+            latest[key] = row
+    return sorted(latest.values(), key=lambda row: (row.get("method", ""), row.get("seed", "")))
+
+
+def write_final_csv(path, rows):
+    fields = ["method", "seed", "round", "train_views", "psnr", "ssim", "lpips"]
+    with open(path, "w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({field: row.get(field, "") for field in fields})
+
+
+def write_final_markdown(path, rows):
+    lines = ["# Final Active Learning Metrics", ""]
+    lines.append("| method | seed | round | train views | PSNR ↑ | SSIM ↑ | LPIPS ↓ |")
+    lines.append("|---|---|---:|---:|---:|---:|---:|")
+    for row in rows:
+        lines.append(
+            "| {method} | {seed} | {round} | {train_views} | {psnr} | {ssim} | {lpips} |".format(
+                method=row.get("method", ""),
+                seed=row.get("seed", ""),
+                round=row.get("round", ""),
+                train_views=row.get("train_views", ""),
+                psnr=fmt(row.get("psnr"), 3),
+                ssim=fmt(row.get("ssim"), 4),
+                lpips=fmt(row.get("lpips"), 4),
+            )
+        )
+    path.write_text("\n".join(lines) + "\n")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Aggregate active-learning experiment outputs")
     parser.add_argument("--al_root", required=True)
@@ -156,10 +200,17 @@ def main():
     rows = collect_rows(al_root)
     csv_path = al_root / "active_learning_summary.csv"
     md_path = al_root / "active_learning_summary.md"
+    final_csv_path = al_root / "final_metrics.csv"
+    final_md_path = al_root / "final_metrics.md"
     write_csv(csv_path, rows)
     write_markdown(md_path, rows)
+    final_rows = final_image_rows(rows)
+    write_final_csv(final_csv_path, final_rows)
+    write_final_markdown(final_md_path, final_rows)
     print(f"Wrote {len(rows)} rows to {csv_path}")
     print(f"Wrote markdown summary to {md_path}")
+    print(f"Wrote final metrics to {final_csv_path}")
+    print(f"Wrote final metrics markdown to {final_md_path}")
 
 
 if __name__ == "__main__":

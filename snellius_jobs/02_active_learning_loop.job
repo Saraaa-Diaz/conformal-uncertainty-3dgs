@@ -24,6 +24,8 @@
 #   TEST=20%
 #   ADD_K=5
 #   ITERS=7000
+#   ITERS_MODE=fixed        # fixed|popgs
+#   PRESET=                # popgs10|popgs20
 #   ALPHA=0.1
 
 set -eu
@@ -33,6 +35,14 @@ if [ -z "${SCENE:-}" ]; then
     exit 1
 fi
 
+ROUNDS_WAS_SET="${ROUNDS+x}"
+INIT_TRAIN_WAS_SET="${INIT_TRAIN+x}"
+CALIB_WAS_SET="${CALIB+x}"
+TEST_WAS_SET="${TEST+x}"
+ADD_K_WAS_SET="${ADD_K+x}"
+ITERS_MODE_WAS_SET="${ITERS_MODE+x}"
+FINAL_ITERS_WAS_SET="${FINAL_ITERS+x}"
+TEST_MODE_WAS_SET="${TEST_MODE+x}"
 METHOD="${METHOD:-combined}"
 SEED="${SEED:-0}"
 ROUNDS="${ROUNDS:-3}"
@@ -41,7 +51,40 @@ CALIB="${CALIB:-10%}"
 TEST="${TEST:-20%}"
 ADD_K="${ADD_K:-5}"
 ITERS="${ITERS:-7000}"
+ITERS_MODE="${ITERS_MODE:-fixed}"
+PRESET="${PRESET:-}"
+FINAL_ITERS="${FINAL_ITERS:-}"
+TEST_MODE="${TEST_MODE:-random}"
+LLFFHOLD="${LLFFHOLD:-8}"
 ALPHA="${ALPHA:-0.1}"
+case "$PRESET" in
+    popgs10)
+        if [ -z "$INIT_TRAIN_WAS_SET" ]; then INIT_TRAIN="2"; fi
+        if [ -z "$CALIB_WAS_SET" ]; then CALIB="10%"; fi
+        if [ -z "$TEST_WAS_SET" ]; then TEST="0"; fi
+        if [ -z "$TEST_MODE_WAS_SET" ]; then TEST_MODE="llffhold"; fi
+        if [ -z "$ADD_K_WAS_SET" ]; then ADD_K="1"; fi
+        if [ -z "$ROUNDS_WAS_SET" ]; then ROUNDS="8"; fi
+        if [ -z "$ITERS_MODE_WAS_SET" ]; then ITERS_MODE="popgs"; fi
+        if [ -z "$FINAL_ITERS_WAS_SET" ]; then FINAL_ITERS="10000"; fi
+        ;;
+    popgs20)
+        if [ -z "$INIT_TRAIN_WAS_SET" ]; then INIT_TRAIN="4"; fi
+        if [ -z "$CALIB_WAS_SET" ]; then CALIB="10%"; fi
+        if [ -z "$TEST_WAS_SET" ]; then TEST="0"; fi
+        if [ -z "$TEST_MODE_WAS_SET" ]; then TEST_MODE="llffhold"; fi
+        if [ -z "$ADD_K_WAS_SET" ]; then ADD_K="1"; fi
+        if [ -z "$ROUNDS_WAS_SET" ]; then ROUNDS="16"; fi
+        if [ -z "$ITERS_MODE_WAS_SET" ]; then ITERS_MODE="popgs"; fi
+        if [ -z "$FINAL_ITERS_WAS_SET" ]; then FINAL_ITERS="21000"; fi
+        ;;
+    "")
+        ;;
+    *)
+        echo "ERROR: unknown PRESET=$PRESET"
+        exit 1
+        ;;
+esac
 TARGET_COVERAGE="$(python -c "print(1.0 - float('${ALPHA}'))")"
 AL_ROOT="${AL_ROOT:-output/active_learning/$(basename "$SCENE")}"
 RUN_ROOT="$AL_ROOT/$METHOD/seed_${SEED}"
@@ -97,10 +140,13 @@ echo "Root       : $RUN_ROOT"
 echo "Method     : $METHOD"
 echo "Seed       : $SEED"
 echo "Rounds     : $ROUNDS"
+echo "Preset     : ${PRESET:-none}"
 echo "Init train : $INIT_TRAIN"
 echo "Calib/Test : $CALIB / $TEST"
+echo "Test mode  : $TEST_MODE"
 echo "Add K      : $ADD_K"
 echo "Iterations : $ITERS"
+echo "Iter mode  : $ITERS_MODE final=${FINAL_ITERS:-none}"
 echo "Alpha      : $ALPHA"
 echo "Signals    : color=$NEED_COLOR sensitivity=$NEED_SENSITIVITY visibility=$NEED_VISIBILITY"
 echo "Start      : $(date)"
@@ -126,7 +172,9 @@ if [ ! -f "$ROUND0_SPLITS/train.txt" ]; then
         --seed "$SEED" \
         --init_train "$INIT_TRAIN" \
         --calib "$CALIB" \
-        --test "$TEST"
+        --test "$TEST" \
+        --test_mode "$TEST_MODE" \
+        --llffhold "$LLFFHOLD"
 fi
 
 for ROUND in $(seq 0 "$ROUNDS"); do
@@ -140,7 +188,21 @@ for ROUND in $(seq 0 "$ROUNDS"); do
     echo "================================================================"
 
     echo "[round $ROUND_PAD] Training"
-    python train.py -s "$SCENE" -m "$ROUND_OUT" --split_dir "$SPLIT_DIR" --iterations "$ITERS" --eval
+    TRAIN_VIEWS="$(grep -cve '^[[:space:]]*$' "$SPLIT_DIR/train.txt")"
+    ROUND_ITERS="$ITERS"
+    if [ "$ITERS_MODE" = "popgs" ]; then
+        ROUND_ITERS=$((100 * TRAIN_VIEWS))
+        if [ "$ROUND" -eq "$ROUNDS" ] && [ -n "$FINAL_ITERS" ]; then
+            ROUND_ITERS="$FINAL_ITERS"
+        fi
+    fi
+    echo "[round $ROUND_PAD] Training views=$TRAIN_VIEWS iterations=$ROUND_ITERS"
+    python train.py -s "$SCENE" -m "$ROUND_OUT" --split_dir "$SPLIT_DIR" --iterations "$ROUND_ITERS" --eval
+
+    if [ "$NEED_COLOR" -eq 0 ] && [ "$NEED_SENSITIVITY" -eq 0 ] && [ "$NEED_VISIBILITY" -eq 0 ]; then
+        echo "[round $ROUND_PAD] Rendering RGB for evaluation/candidates"
+        python render.py -m "$ROUND_OUT" --split_dir "$SPLIT_DIR" --skip_train
+    fi
 
     if [ "$NEED_COLOR" -eq 1 ]; then
         echo "[round $ROUND_PAD] Rendering color"
@@ -212,7 +274,7 @@ for ROUND in $(seq 0 "$ROUNDS"); do
         NEXT_ROUND=$((ROUND + 1))
         NEXT_PAD="$(printf "%02d" "$NEXT_ROUND")"
         NEXT_SPLITS="$RUN_ROOT/round_${NEXT_PAD}/splits"
-        RANKINGS="$ROUND_OUT/active_learning/ours_${ITERS}/view_rankings.json"
+        RANKINGS="$ROUND_OUT/active_learning/ours_${ROUND_ITERS}/view_rankings.json"
 
         echo "[round $ROUND_PAD] Selecting next $ADD_K views for round_$NEXT_PAD"
         if [ "$METHOD" = "random" ] || [ "$METHOD" = "uniform" ]; then

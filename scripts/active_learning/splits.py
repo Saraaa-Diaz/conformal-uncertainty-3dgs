@@ -92,19 +92,33 @@ def init_splits(args):
     init_train_n = count_from_arg(args.init_train, total, "init_train")
     calib_n = count_from_arg(args.calib, total, "calib")
     test_n = count_from_arg(args.test, total, "test")
-    if init_train_n + calib_n + test_n >= total:
+    if args.test_mode == "llffhold":
+        test_idx = [idx for idx in range(total) if idx % args.llffhold == 0]
+        train_pool = [idx for idx in range(total) if idx not in set(test_idx)]
+        if init_train_n + calib_n >= len(train_pool):
+            raise ValueError(
+                f"init_train+calib must leave candidates: "
+                f"{init_train_n}+{calib_n} >= {len(train_pool)}"
+            )
+        rng = np.random.default_rng(args.seed)
+        perm = rng.permutation(train_pool).tolist()
+        train_idx = sorted(perm[:init_train_n])
+        calib_idx = sorted(perm[init_train_n : init_train_n + calib_n])
+        used = set(train_idx) | set(calib_idx) | set(test_idx)
+        candidate_idx = [idx for idx in range(total) if idx not in used]
+    elif init_train_n + calib_n + test_n >= total:
         raise ValueError(
             f"init_train+calib+test must leave candidates: "
             f"{init_train_n}+{calib_n}+{test_n} >= {total}"
         )
-
-    rng = np.random.default_rng(args.seed)
-    perm = rng.permutation(total).tolist()
-    train_idx = sorted(perm[:init_train_n])
-    calib_idx = sorted(perm[init_train_n : init_train_n + calib_n])
-    test_idx = sorted(perm[init_train_n + calib_n : init_train_n + calib_n + test_n])
-    used = set(train_idx) | set(calib_idx) | set(test_idx)
-    candidate_idx = [idx for idx in range(total) if idx not in used]
+    else:
+        rng = np.random.default_rng(args.seed)
+        perm = rng.permutation(total).tolist()
+        train_idx = sorted(perm[:init_train_n])
+        calib_idx = sorted(perm[init_train_n : init_train_n + calib_n])
+        test_idx = sorted(perm[init_train_n + calib_n : init_train_n + calib_n + test_n])
+        used = set(train_idx) | set(calib_idx) | set(test_idx)
+        candidate_idx = [idx for idx in range(total) if idx not in used]
 
     split_map = {
         "train": [images[idx] for idx in train_idx],
@@ -124,6 +138,8 @@ def init_splits(args):
         "init_train": args.init_train,
         "calib": args.calib,
         "test": args.test,
+        "test_mode": args.test_mode,
+        "llffhold": args.llffhold,
         **split_map,
     }
     write_summary(output_dir, payload)
@@ -220,6 +236,8 @@ def main():
     init.add_argument("--init_train", default="10%")
     init.add_argument("--calib", default="10%")
     init.add_argument("--test", default="20%")
+    init.add_argument("--test_mode", default="random", choices=["random", "llffhold"])
+    init.add_argument("--llffhold", type=int, default=8)
     init.set_defaults(func=init_splits)
 
     update = sub.add_parser("update")
