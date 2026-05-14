@@ -67,11 +67,11 @@ def parse_args():
     parser.add_argument("--rgb_error_mode", default="mean", choices=["mean", "max"], help="How to reduce RGB absolute error across channels")
     parser.add_argument(
         "--sigma_norm",
-        default="none",
+        default="minmax_calib",
         choices=["none", "minmax_calib", "minmax_pooled"],
-        help="How to normalize sigma. 'none' = use raw sigma (recommended). "
-             "'minmax_calib' = old behavior, fit on calib only (can underco0ver). "
-             "'minmax_pooled' = fit on calib+test together.",
+        help="How to normalize uncertainty u before calibration. "
+             "'minmax_calib' fits min/max on calibration pixels only and is the default. "
+             "'none' uses raw u. 'minmax_pooled' fits on calib+test for diagnostics only.",
     )
     return parser.parse_args()
 
@@ -491,8 +491,8 @@ def main():
             "num_pixels": int(abs_error.size),
             "num_valid_pixels": int(valid.sum()),
             "coverage": float(np.mean(within_interval[valid])) if np.any(valid) else 0.0,
-            "mean_interval_size": float(np.mean(uncertainty_full_width[valid])) if np.any(valid) else 0.0,
-            "interval_size_std": float(np.std(uncertainty_full_width[valid])) if np.any(valid) else 0.0,
+            "mean_full_width": float(np.mean(uncertainty_full_width[valid])) if np.any(valid) else 0.0,
+            "full_width_std": float(np.std(uncertainty_full_width[valid])) if np.any(valid) else 0.0,
             "ae_uncertainty_corr": corr,
             "ause": view_ause,
             "raw_sigma": finite_stats(raw_sigma, mask),
@@ -502,7 +502,7 @@ def main():
         print(
             f"  [test  {frame_idx:>3}/{len(test_frames)}] "
             f"{frame_name} | coverage={per_view_metrics[frame_name]['coverage']:.6f} "
-            f"mean_2u={per_view_metrics[frame_name]['mean_interval_size']:.6f} "
+            f"mean_full_width_2q_u={per_view_metrics[frame_name]['mean_full_width']:.6f} "
             f"corr={corr:.6f} ause={view_ause:.6f}"
         )
 
@@ -537,10 +537,10 @@ def main():
     per_view_summary = {
         "coverage_mean": metric_mean(per_view_metrics, "coverage"),
         "coverage_std": metric_std(per_view_metrics, "coverage"),
-        "mean_interval_size_mean": metric_mean(per_view_metrics, "mean_interval_size"),
-        "mean_interval_size_std": metric_std(per_view_metrics, "mean_interval_size"),
-        "interval_size_std_mean": metric_mean(per_view_metrics, "interval_size_std"),
-        "interval_size_std_std": metric_std(per_view_metrics, "interval_size_std"),
+        "mean_full_width_mean": metric_mean(per_view_metrics, "mean_full_width"),
+        "mean_full_width_std": metric_std(per_view_metrics, "mean_full_width"),
+        "full_width_std_mean": metric_mean(per_view_metrics, "full_width_std"),
+        "full_width_std_std": metric_std(per_view_metrics, "full_width_std"),
         "ae_uncertainty_corr_mean": metric_mean(per_view_metrics, "ae_uncertainty_corr"),
         "ae_uncertainty_corr_std": metric_std(per_view_metrics, "ae_uncertainty_corr"),
         "ause_mean": metric_mean(per_view_metrics, "ause"),
@@ -565,10 +565,10 @@ def main():
         "sigma_normalization": normalization,
         "test_pixel_coverage": per_view_summary["coverage_mean"],
         "test_pixel_coverage_std": per_view_summary["coverage_std"],
-        "test_mean_interval_size": per_view_summary["mean_interval_size_mean"],
-        "test_mean_interval_size_std_per_view": per_view_summary["mean_interval_size_std"],
-        "test_interval_size_std": per_view_summary["interval_size_std_mean"],
-        "test_interval_size_std_std_per_view": per_view_summary["interval_size_std_std"],
+        "test_mean_full_width": per_view_summary["mean_full_width_mean"],
+        "test_mean_full_width_std_per_view": per_view_summary["mean_full_width_std"],
+        "test_full_width_std": per_view_summary["full_width_std_mean"],
+        "test_full_width_std_std_per_view": per_view_summary["full_width_std_std"],
         "mean_per_view_ae_uncertainty_corr": per_view_summary["ae_uncertainty_corr_mean"],
         "std_per_view_ae_uncertainty_corr": per_view_summary["ae_uncertainty_corr_std"],
         "mean_per_view_ause": per_view_summary["ause_mean"],
@@ -583,8 +583,8 @@ def main():
     print("-" * 72)
     print(f"Total sampled calib pixels : {total_calib_sampled_pixels}")
     print(f"Mean per-view coverage     : {summary['test_pixel_coverage']:.6f} ± {summary['test_pixel_coverage_std']:.6f}")
-    print(f"Mean per-view 2u           : {summary['test_mean_interval_size']:.6f} ± {summary['test_mean_interval_size_std_per_view']:.6f}")
-    print(f"Mean per-view 2u std       : {summary['test_interval_size_std']:.6f} ± {summary['test_interval_size_std_std_per_view']:.6f}")
+    print(f"Mean per-view full width   : {summary['test_mean_full_width']:.6f} ± {summary['test_mean_full_width_std_per_view']:.6f}")
+    print(f"Mean per-view full width std: {summary['test_full_width_std']:.6f} ± {summary['test_full_width_std_std_per_view']:.6f}")
     print(f"Mean per-view AE corr      : {summary['mean_per_view_ae_uncertainty_corr']:.6f} ± {summary['std_per_view_ae_uncertainty_corr']:.6f}")
     print(f"Mean per-view AUSE         : {summary['mean_per_view_ause']:.6f} ± {summary['std_per_view_ause']:.6f}")
     print(f"Summary metrics saved to   : {summary_dir / 'metrics.json'}")

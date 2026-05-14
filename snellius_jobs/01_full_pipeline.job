@@ -20,7 +20,7 @@ if [ -z "${SCENE:-}" ]; then
     exit 1
 fi
 
-OUTPUT_BASE="${OUTPUT_BASE:-/scratch-shared/$USER/output}"
+OUTPUT_BASE="${OUTPUT_BASE:-/scratch-shared/$USER/output_fullwidth}"
 OUT="${OUT:-$OUTPUT_BASE/$(basename "$SCENE")}"
 ITERS="${ITERS:-30000}"
 ALPHA="${ALPHA:-0.1}"
@@ -114,13 +114,14 @@ for MOD in color depth entropy sensitivity visibility; do
     python scripts/conformal_prediction.py \
         --run_dir "$RUN_DIR" \
         --modality "$MOD" \
+        --sigma_norm minmax_calib \
         --alpha "$ALPHA" \
         --calib_sample_ratio 0.1
 done
 
 # 8. Aggregate
 echo "[done] Exporting active-learning rankings"
-python scripts/active_learning/export_rankings.py --run_dir "$RUN_DIR"
+python scripts/active_learning/export_rankings.py --run_dir "$RUN_DIR" --sigma_norm minmax_calib --score_top_fraction 0.10
 
 echo "[done] Aggregating results"
 python scripts/aggregate_results.py --run_dir "$RUN_DIR"

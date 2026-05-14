@@ -50,6 +50,34 @@ def conformal_quantile(scores, alpha):
     return float(np.quantile(scores, level, method="higher")), level
 
 
+def fit_minmax(pool, modality, sigma_key, eps):
+    values = []
+    for sd, name in pool:
+        _, _, sigma, mask = load_frame(sd, modality, name, sigma_key)
+        valid = np.isfinite(sigma) & mask
+        if np.any(valid):
+            values.append(sigma[valid])
+    if not values:
+        raise ValueError(f"No finite sigma values for {modality}/{sigma_key}")
+    pooled = np.concatenate(values).astype(np.float32)
+    sigma_min = float(pooled.min())
+    sigma_max = float(pooled.max())
+    return {
+        "mode": "minmax_calib",
+        "sigma_min": sigma_min,
+        "sigma_max": sigma_max,
+        "sigma_scale": max(sigma_max - sigma_min, eps),
+    }
+
+
+def normalize_sigma(sigma, mask, normalization, eps):
+    sigma = np.nan_to_num(np.asarray(sigma, dtype=np.float32), nan=0.0, posinf=0.0, neginf=0.0)
+    sigma_norm = (sigma - normalization["sigma_min"]) / normalization["sigma_scale"]
+    sigma_norm = np.clip(sigma_norm, 0.0, 1.0).astype(np.float32)
+    sigma_norm[~mask] = 0.0
+    return sigma_norm, np.maximum(sigma_norm, eps)
+
+
 def pearson(a, b):
     a, b = a.reshape(-1), b.reshape(-1)
     if a.std() < 1e-12 or b.std() < 1e-12 or a.size < 2:
@@ -107,12 +135,14 @@ def run_one(modality, sigma_key, run_dir, iteration, alpha, calib_n, calib_sampl
     calib_pool = [pool[i] for i in calib_idx]
     test_pool = [pool[i] for i in test_idx]
 
-    # Calibration: sample 10% per image, compute scores = |err|/sigma directly on raw sigma.
+    normalization = fit_minmax(calib_pool, modality, sigma_key, eps)
+
+    # Calibration: sample pixels and compute scores = |err| / u_norm.
     calib_scores = []
     for sd, name in calib_pool:
         render, gt, sigma, mask = load_frame(sd, modality, name, sigma_key)
         err = np.abs(render - gt).mean(axis=2)  # mean over RGB channels
-        sigma_safe = np.maximum(sigma, eps)
+        sigma_norm, sigma_safe = normalize_sigma(sigma, mask, normalization, eps)
         n_pix = err.size
         n_samp = max(1, int(math.ceil(calib_sample_ratio * n_pix)))
         idx = rng.choice(n_pix, size=n_samp, replace=False)
@@ -129,7 +159,8 @@ def run_one(modality, sigma_key, run_dir, iteration, alpha, calib_n, calib_sampl
     for sd, name in test_pool:
         render, gt, sigma, mask = load_frame(sd, modality, name, sigma_key)
         err = np.abs(render - gt).mean(axis=2)
-        u = q_hat * sigma
+        sigma_norm, _ = normalize_sigma(sigma, mask, normalization, eps)
+        u = q_hat * sigma_norm
         within = err <= u
         full_w = 2.0 * u
         valid = np.isfinite(err) & np.isfinite(full_w) & mask
@@ -147,10 +178,10 @@ def run_one(modality, sigma_key, run_dir, iteration, alpha, calib_n, calib_sampl
             "num_pixels": int(err.size),
             "num_valid_pixels": int(valid.sum()),
             "coverage": coverage,
-            "mean_interval_size": mean_width,
-            "interval_size_std": width_std,
             "ae_uncertainty_corr": corr,
             "ause": view_ause,
+            "mean_full_width": mean_width,
+            "full_width_std": width_std,
         }
 
     return {
@@ -160,10 +191,10 @@ def run_one(modality, sigma_key, run_dir, iteration, alpha, calib_n, calib_sampl
         "target_coverage": 1.0 - alpha,
         "test_pixel_coverage": float(np.mean(covs)) if covs else 0.0,
         "test_pixel_coverage_std": float(np.std(covs)) if covs else 0.0,
-        "test_mean_interval_size": float(np.mean(widths)) if widths else 0.0,
-        "test_mean_interval_size_std_per_view": float(np.std(widths)) if widths else 0.0,
-        "test_interval_size_std": float(np.mean(width_stds)) if width_stds else 0.0,
-        "test_interval_size_std_std_per_view": float(np.std(width_stds)) if width_stds else 0.0,
+        "test_mean_full_width": float(np.mean(widths)) if widths else 0.0,
+        "test_mean_full_width_std_per_view": float(np.std(widths)) if widths else 0.0,
+        "test_full_width_std": float(np.mean(width_stds)) if width_stds else 0.0,
+        "test_full_width_std_std_per_view": float(np.std(width_stds)) if width_stds else 0.0,
         "mean_per_view_ae_uncertainty_corr": float(np.mean(corrs)) if corrs else 0.0,
         "std_per_view_ae_uncertainty_corr": float(np.std(corrs)) if corrs else 0.0,
         "mean_per_view_ause": float(np.mean(auses)) if auses else 0.0,
@@ -174,6 +205,7 @@ def run_one(modality, sigma_key, run_dir, iteration, alpha, calib_n, calib_sampl
         "num_test_frames": len(test_pool),
         "num_calib_scores": len(calib_scores),
         "split_seed": seed,
+        "sigma_normalization": normalization,
         "test_frame_metrics": view_metrics,
     }
 
@@ -205,7 +237,7 @@ def main():
     print(f"alpha     : {args.alpha}, target cov: {1.0 - args.alpha:.3f}")
     print(f"split     : random seed={args.seed}, calib_n={args.calib_n}")
     print()
-    print(f"{'modality':12} {'cov':>7} {'mean_2u':>10} {'std_2u':>10} {'AE_corr':>10} {'AUSE':>10}")
+    print(f"{'modality':12} {'cov':>7} {'mean_full_width':>16} {'std_full_width':>16} {'AE_corr':>10} {'AUSE':>10}")
     print("-" * 68)
 
     for mod, key in DEFAULT_SIGMA_KEYS.items():
@@ -218,7 +250,7 @@ def main():
         out_dir.mkdir(parents=True, exist_ok=True)
         with open(out_dir / "metrics.json", "w") as fh:
             json.dump(r, fh, indent=2)
-        print(f"{mod:12} {r['test_pixel_coverage']:7.4f} {r['test_mean_interval_size']:10.2f} {r['test_interval_size_std']:10.2f} {r['mean_per_view_ae_uncertainty_corr']:10.4f} {r['mean_per_view_ause']:10.4f}")
+        print(f"{mod:12} {r['test_pixel_coverage']:7.4f} {r['test_mean_full_width']:16.2f} {r['test_full_width_std']:16.2f} {r['mean_per_view_ae_uncertainty_corr']:10.4f} {r['mean_per_view_ause']:10.4f}")
 
 
 if __name__ == "__main__":

@@ -6,7 +6,7 @@ each fold:
   - calib = 30 random frames (drawn from the 60 not-in-test frames)
   - test = 30 frames (the fold's hold-out)
 
-Reports per-fold coverage + interval width + AE correlation, plus the mean
+Reports per-fold coverage + calibrated full width + AE correlation, plus the mean
 and std across folds. If coverage is honest, std should be small.
 """
 
@@ -36,7 +36,7 @@ def main():
     iteration = max(iter_dirs)
 
     # Load pool of all 90 held-out frames.
-    from conformal_random_split import load_frame, conformal_quantile, pearson, ause
+    from conformal_random_split import load_frame, conformal_quantile, pearson, ause, fit_minmax, normalize_sigma
     pool = []
     for split in ("calib", "test"):
         sd = run_dir / split / f"ours_{iteration}"
@@ -61,12 +61,13 @@ def main():
         for mod, key in DEFAULT_SIGMA_KEYS.items():
             calib_pool = [pool[i] for i in calib_idx]
             test_pool = [pool[i] for i in test_idx]
+            normalization = fit_minmax(calib_pool, mod, key, 1e-6)
 
             calib_scores = []
             for sd, name in calib_pool:
                 render, gt, sigma, mask = load_frame(sd, mod, name, key)
                 err = np.abs(render - gt).mean(axis=2)
-                sigma_safe = np.maximum(sigma, 1e-6)
+                sigma_norm, sigma_safe = normalize_sigma(sigma, mask, normalization, 1e-6)
                 n_pix = err.size
                 n_samp = max(1, int(math.ceil(0.1 * n_pix)))
                 idx = rng.choice(n_pix, size=n_samp, replace=False)
@@ -81,7 +82,8 @@ def main():
             for sd, name in test_pool:
                 render, gt, sigma, mask = load_frame(sd, mod, name, key)
                 err = np.abs(render - gt).mean(axis=2)
-                u = q_hat * sigma
+                sigma_norm, _ = normalize_sigma(sigma, mask, normalization, 1e-6)
+                u = q_hat * sigma_norm
                 full_w = 2.0 * u
                 valid = np.isfinite(err) & np.isfinite(full_w) & mask
                 covs.append((err[valid] <= u[valid]).mean() if np.any(valid) else 0.0)
@@ -93,13 +95,13 @@ def main():
             mean_corr = float(np.mean(corrs))
             mean_ause = float(np.mean(auses))
             results_per_mod[mod].append((mean_cov, mean_w, mean_corr, mean_ause))
-            print(f"  {mod:12} cov={mean_cov:.4f}  2u={mean_w:8.2f}  corr={mean_corr:+.4f}  ause={mean_ause:.4f}")
+            print(f"  {mod:12} cov={mean_cov:.4f}  full_width={mean_w:8.2f}  corr={mean_corr:+.4f}  ause={mean_ause:.4f}")
         print()
 
     print("=" * 64)
     print("CROSS-VALIDATED RESULTS (mean ± std over folds)")
     print("=" * 64)
-    print(f"{'modality':12} {'cov':>16} {'mean 2u':>16} {'AE corr':>14} {'AUSE':>14}")
+    print(f"{'modality':12} {'cov':>16} {'mean full width':>16} {'AE corr':>14} {'AUSE':>14}")
     for mod, vals in results_per_mod.items():
         c = np.array([v[0] for v in vals]); w = np.array([v[1] for v in vals]); r = np.array([v[2] for v in vals]); a = np.array([v[3] for v in vals])
         print(f"{mod:12} {c.mean():.4f}±{c.std():.4f}  {w.mean():9.2f}±{w.std():6.2f}    {r.mean():+.4f}±{r.std():.4f}    {a.mean():.4f}±{a.std():.4f}")

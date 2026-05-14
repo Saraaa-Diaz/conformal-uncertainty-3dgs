@@ -24,7 +24,7 @@ IMAGE_METRICS = {
 
 UNCERTAINTY_METRICS = {
     "coverage": ("Coverage", "Coverage", "target"),
-    "mean_2u": ("Mean Interval Width", "mean 2u", "lower"),
+    "mean_full_width": ("Mean Full Width", "mean full width 2q*u", "lower"),
     "ae_corr": ("AE-Uncertainty Correlation", "Pearson r", "higher"),
     "ause": ("AUSE", "AUSE", "lower"),
 }
@@ -44,7 +44,7 @@ def read_rows(path):
         out = dict(row)
         out["round"] = int(row["round"])
         out["train_views"] = int(row["train_views"])
-        for key in ("psnr", "ssim", "lpips", "coverage", "mean_2u", "ae_corr", "ause"):
+        for key in ("psnr", "ssim", "lpips", "coverage", "mean_full_width", "ae_corr", "ause"):
             out[key] = parse_float(row.get(key))
         parsed.append(out)
     return parsed
@@ -77,7 +77,7 @@ def group_acquisition_uncertainty_rows(rows):
     for row in rows:
         if not method_has_signal(row):
             continue
-        if row.get("mean_2u") is None:
+        if row.get("mean_full_width") is None:
             continue
         key = (row["method"], row["seed"], row["round"], row["train_views"])
         by_key.setdefault(key, row)
@@ -135,7 +135,7 @@ def plot_psnr_with_uncertainty_shading(rows, out_path):
     psnr_rows = group_image_rows(rows)
     psnr_series = series_by_method(psnr_rows, "psnr")
     uncertainty_rows = group_acquisition_uncertainty_rows(rows)
-    width_series = series_by_method(uncertainty_rows, "mean_2u")
+    width_series = series_by_method(uncertainty_rows, "mean_full_width")
     if not psnr_series:
         return False
 
@@ -169,7 +169,7 @@ def plot_psnr_with_interval_width(rows, out_path):
     psnr_rows = group_image_rows(rows)
     uncertainty_rows = group_acquisition_uncertainty_rows(rows)
     psnr_series = series_by_method(psnr_rows, "psnr")
-    width_series = series_by_method(uncertainty_rows, "mean_2u")
+    width_series = series_by_method(uncertainty_rows, "mean_full_width")
     if not psnr_series:
         return False
 
@@ -210,13 +210,13 @@ def plot_psnr_with_interval_width(rows, out_path):
                 linewidth=1.5,
                 color=color,
                 alpha=0.75,
-                label=f"{method} mean 2u",
+                label=f"{method} mean full width",
             )[0]
             width_handles.append(width_line)
 
     ax_psnr.set_xlabel("Training views")
     ax_psnr.set_ylabel("PSNR (dB)")
-    ax_width.set_ylabel("Mean interval width (2u)")
+    ax_width.set_ylabel("Mean full width (2q*u)")
     ax_psnr.set_title("PSNR vs Training Views with Interval Width")
     ax_psnr.grid(True, alpha=0.25)
     handles = [h[0] if hasattr(h, "__getitem__") else h for h in psnr_handles] + width_handles
@@ -270,7 +270,7 @@ def main():
 
     uncertainty_rows = group_acquisition_uncertainty_rows(rows)
     out_path = out_dir / "uncertainty_vs_train_views.png"
-    if plot_metric(uncertainty_rows, "mean_2u", "Uncertainty vs Training Views", "mean 2u", out_path):
+    if plot_metric(uncertainty_rows, "mean_full_width", "Uncertainty vs Training Views", "mean full width 2q*u", out_path):
         written.append(out_path)
 
     print(f"Wrote {len(written)} figures to {out_dir}")

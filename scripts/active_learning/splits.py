@@ -18,9 +18,16 @@ Selection methods:
 
 import argparse
 import json
+import sys
 from pathlib import Path
 
 import numpy as np
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from scene.colmap_loader import qvec2rotmat, read_extrinsics_binary, read_extrinsics_text
 
 
 ACQUISITION_KEYS = {
@@ -74,6 +81,52 @@ def count_from_arg(value, total, name):
     return count
 
 
+def load_camera_centers(source_path):
+    sparse_dir = Path(source_path).resolve() / "sparse" / "0"
+    try:
+        extrinsics = read_extrinsics_binary(sparse_dir / "images.bin")
+    except Exception:
+        extrinsics = read_extrinsics_text(sparse_dir / "images.txt")
+    centers = {}
+    for extr in extrinsics.values():
+        rotation = qvec2rotmat(extr.qvec)
+        centers[extr.name] = (-rotation.T @ extr.tvec).astype(np.float32)
+    return centers
+
+
+def farthest_point_train_indices(images, pool_idx, count, source_path, seed, first_mode):
+    if count <= 0:
+        return []
+    if count > len(pool_idx):
+        raise ValueError(f"Cannot choose {count} train views from pool of {len(pool_idx)}")
+    rng = np.random.default_rng(seed)
+    centers_by_name = load_camera_centers(source_path)
+    missing = [images[idx] for idx in pool_idx if images[idx] not in centers_by_name]
+    if missing:
+        raise ValueError(f"Missing camera poses for FPS init images: {missing[:10]}")
+
+    selected = [pool_idx[int(rng.integers(len(pool_idx)))] if first_mode == "random" else pool_idx[0]]
+    remaining = [idx for idx in pool_idx if idx not in selected]
+    while len(selected) < count:
+        selected_centers = np.stack([centers_by_name[images[idx]] for idx in selected], axis=0)
+        remaining_centers = np.stack([centers_by_name[images[idx]] for idx in remaining], axis=0)
+        distances = np.linalg.norm(remaining_centers[:, None, :] - selected_centers[None, :, :], axis=2)
+        next_idx = int(np.argmax(distances.min(axis=1)))
+        selected.append(remaining.pop(next_idx))
+    return sorted(selected)
+
+
+def choose_initial_train_indices(args, images, train_pool, init_train_n):
+    if args.init_method == "random":
+        rng = np.random.default_rng(args.seed)
+        return sorted(rng.permutation(train_pool).tolist()[:init_train_n])
+    if args.init_method == "random_fps":
+        return farthest_point_train_indices(images, train_pool, init_train_n, args.source_path, args.seed, "random")
+    if args.init_method == "first_fps":
+        return farthest_point_train_indices(images, train_pool, init_train_n, args.source_path, args.seed, "first")
+    raise ValueError(f"Unknown init_method={args.init_method}")
+
+
 def write_summary(output_dir, payload):
     with open(output_dir / "summary.json", "w") as handle:
         json.dump(payload, handle, indent=2)
@@ -100,10 +153,10 @@ def init_splits(args):
                 f"init_train+calib must leave candidates: "
                 f"{init_train_n}+{calib_n} >= {len(train_pool)}"
             )
+        train_idx = choose_initial_train_indices(args, images, train_pool, init_train_n)
         rng = np.random.default_rng(args.seed)
-        perm = rng.permutation(train_pool).tolist()
-        train_idx = sorted(perm[:init_train_n])
-        calib_idx = sorted(perm[init_train_n : init_train_n + calib_n])
+        calib_pool = [idx for idx in train_pool if idx not in set(train_idx)]
+        calib_idx = sorted(rng.permutation(calib_pool).tolist()[:calib_n])
         used = set(train_idx) | set(calib_idx) | set(test_idx)
         candidate_idx = [idx for idx in range(total) if idx not in used]
     elif init_train_n + calib_n + test_n >= total:
@@ -114,9 +167,11 @@ def init_splits(args):
     else:
         rng = np.random.default_rng(args.seed)
         perm = rng.permutation(total).tolist()
-        train_idx = sorted(perm[:init_train_n])
-        calib_idx = sorted(perm[init_train_n : init_train_n + calib_n])
-        test_idx = sorted(perm[init_train_n + calib_n : init_train_n + calib_n + test_n])
+        test_idx = sorted(perm[:test_n])
+        train_pool = [idx for idx in range(total) if idx not in set(test_idx)]
+        train_idx = choose_initial_train_indices(args, images, train_pool, init_train_n)
+        calib_pool = [idx for idx in train_pool if idx not in set(train_idx)]
+        calib_idx = sorted(rng.permutation(calib_pool).tolist()[:calib_n])
         used = set(train_idx) | set(calib_idx) | set(test_idx)
         candidate_idx = [idx for idx in range(total) if idx not in used]
 
@@ -140,6 +195,7 @@ def init_splits(args):
         "test": args.test,
         "test_mode": args.test_mode,
         "llffhold": args.llffhold,
+        "init_method": args.init_method,
         **split_map,
     }
     write_summary(output_dir, payload)
@@ -238,6 +294,7 @@ def main():
     init.add_argument("--test", default="20%")
     init.add_argument("--test_mode", default="random", choices=["random", "llffhold"])
     init.add_argument("--llffhold", type=int, default=8)
+    init.add_argument("--init_method", default="random", choices=["random", "random_fps", "first_fps"])
     init.set_defaults(func=init_splits)
 
     update = sub.add_parser("update")

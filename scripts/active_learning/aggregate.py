@@ -76,8 +76,8 @@ def collect_rows(al_root):
                             "sigma_key": metrics.get("sigma_key"),
                             "coverage": metrics.get("test_pixel_coverage"),
                             "coverage_std": metrics.get("test_pixel_coverage_std"),
-                            "mean_2u": metrics.get("test_mean_interval_size"),
-                            "mean_2u_std": metrics.get("test_mean_interval_size_std_per_view"),
+                            "mean_full_width": metrics.get("test_mean_full_width"),
+                            "mean_full_width_std": metrics.get("test_mean_full_width_std_per_view"),
                             "ae_corr": metrics.get("mean_per_view_ae_uncertainty_corr"),
                             "ae_corr_std": metrics.get("std_per_view_ae_uncertainty_corr"),
                             "ause": metrics.get("mean_per_view_ause"),
@@ -104,8 +104,8 @@ def write_csv(path, rows):
         "sigma_key",
         "coverage",
         "coverage_std",
-        "mean_2u",
-        "mean_2u_std",
+        "mean_full_width",
+        "mean_full_width_std",
         "ae_corr",
         "ae_corr_std",
         "ause",
@@ -127,11 +127,11 @@ def fmt(value, digits=4):
 
 def write_markdown(path, rows):
     lines = ["# Active Learning Summary", ""]
-    lines.append("| method | seed | round | train views | PSNR | SSIM | LPIPS | modality | coverage | mean 2u | AE corr | AUSE |")
+    lines.append("| method | seed | round | train views | PSNR | SSIM | LPIPS | modality | coverage | mean full width 2q*u | AE corr | AUSE |")
     lines.append("|---|---|---:|---:|---:|---:|---:|---|---:|---:|---:|---:|")
     for row in rows:
         lines.append(
-            "| {method} | {seed} | {round} | {train_views} | {psnr} | {ssim} | {lpips} | {modality} | {coverage} | {mean_2u} | {ae_corr} | {ause} |".format(
+            "| {method} | {seed} | {round} | {train_views} | {psnr} | {ssim} | {lpips} | {modality} | {coverage} | {mean_full_width} | {ae_corr} | {ause} |".format(
                 method=row.get("method", ""),
                 seed=row.get("seed", ""),
                 round=row.get("round", ""),
@@ -141,7 +141,7 @@ def write_markdown(path, rows):
                 lpips=fmt(row.get("lpips"), 4),
                 modality=row.get("modality", ""),
                 coverage=fmt(row.get("coverage"), 4),
-                mean_2u=fmt(row.get("mean_2u"), 2),
+                mean_full_width=fmt(row.get("mean_full_width"), 2),
                 ae_corr=fmt(row.get("ae_corr"), 4),
                 ause=fmt(row.get("ause"), 4),
             )

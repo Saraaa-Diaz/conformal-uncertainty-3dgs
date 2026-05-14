@@ -340,7 +340,7 @@ $$
 Coverage on test uses the interval half-width:
 
 $$
-u(x) = \hat{q}_{1-\alpha}\sigma(x)
+u(x) = \hat{q}_{1-\alpha}u_{\text{norm}}(x)
 $$
 
 with criterion:
@@ -352,8 +352,11 @@ $$
 The saved uncertainty map is the full conformal width:
 
 $$
-2u(x) = 2\hat{q}_{1-\alpha}\sigma(x)
+2u(x) = 2\hat{q}_{1-\alpha}u_{\text{norm}}(x)
 $$
+
+By default, `u_norm` is min-max normalized with min/max fit on calibration
+pixels only before calibration.
 
 For each frame, the script saves a 6-panel figure in this order:
 

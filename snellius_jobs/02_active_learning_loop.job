@@ -15,11 +15,12 @@
 #   SCENE=/path/to/scene
 #
 # Optional:
-#   AL_ROOT=/scratch-shared/$USER/output/active_learning/<scene_slug>
+#   AL_ROOT=/scratch-shared/$USER/output_fullwidth/active_learning/<scene_slug>
 #   METHOD=combined          # random|uniform|fisher|pup|sensitivity|color|visibility|combined
 #   SEED=0
 #   ROUNDS=3                # round_00 plus this many acquisition updates
 #   INIT_TRAIN=10%          # count, fraction, or percent string
+#   INIT_METHOD=random      # random|random_fps|first_fps
 #   CALIB=10%
 #   TEST=20%
 #   ADD_K=5
@@ -37,6 +38,7 @@ fi
 
 ROUNDS_WAS_SET="${ROUNDS+x}"
 INIT_TRAIN_WAS_SET="${INIT_TRAIN+x}"
+INIT_METHOD_WAS_SET="${INIT_METHOD+x}"
 CALIB_WAS_SET="${CALIB+x}"
 TEST_WAS_SET="${TEST+x}"
 ADD_K_WAS_SET="${ADD_K+x}"
@@ -47,6 +49,7 @@ METHOD="${METHOD:-combined}"
 SEED="${SEED:-0}"
 ROUNDS="${ROUNDS:-3}"
 INIT_TRAIN="${INIT_TRAIN:-10%}"
+INIT_METHOD="${INIT_METHOD:-random}"
 CALIB="${CALIB:-10%}"
 TEST="${TEST:-20%}"
 ADD_K="${ADD_K:-5}"
@@ -60,6 +63,7 @@ ALPHA="${ALPHA:-0.1}"
 case "$PRESET" in
     popgs10)
         if [ -z "$INIT_TRAIN_WAS_SET" ]; then INIT_TRAIN="2"; fi
+        if [ -z "$INIT_METHOD_WAS_SET" ]; then INIT_METHOD="random_fps"; fi
         if [ -z "$CALIB_WAS_SET" ]; then CALIB="10%"; fi
         if [ -z "$TEST_WAS_SET" ]; then TEST="0"; fi
         if [ -z "$TEST_MODE_WAS_SET" ]; then TEST_MODE="llffhold"; fi
@@ -70,6 +74,7 @@ case "$PRESET" in
         ;;
     popgs20)
         if [ -z "$INIT_TRAIN_WAS_SET" ]; then INIT_TRAIN="4"; fi
+        if [ -z "$INIT_METHOD_WAS_SET" ]; then INIT_METHOD="random_fps"; fi
         if [ -z "$CALIB_WAS_SET" ]; then CALIB="10%"; fi
         if [ -z "$TEST_WAS_SET" ]; then TEST="0"; fi
         if [ -z "$TEST_MODE_WAS_SET" ]; then TEST_MODE="llffhold"; fi
@@ -86,7 +91,7 @@ case "$PRESET" in
         ;;
 esac
 TARGET_COVERAGE="$(python -c "print(1.0 - float('${ALPHA}'))")"
-OUTPUT_BASE="${OUTPUT_BASE:-/scratch-shared/$USER/output}"
+OUTPUT_BASE="${OUTPUT_BASE:-/scratch-shared/$USER/output_fullwidth}"
 AL_ROOT="${AL_ROOT:-$OUTPUT_BASE/active_learning/$(basename "$SCENE")}"
 RUN_ROOT="$AL_ROOT/$METHOD/seed_${SEED}"
 NEED_COLOR=0
@@ -143,6 +148,7 @@ echo "Seed       : $SEED"
 echo "Rounds     : $ROUNDS"
 echo "Preset     : ${PRESET:-none}"
 echo "Init train : $INIT_TRAIN"
+echo "Init method: $INIT_METHOD"
 echo "Calib/Test : $CALIB / $TEST"
 echo "Test mode  : $TEST_MODE"
 echo "Add K      : $ADD_K"
@@ -172,6 +178,7 @@ if [ ! -f "$ROUND0_SPLITS/train.txt" ]; then
         --output_dir "$ROUND0_SPLITS" \
         --seed "$SEED" \
         --init_train "$INIT_TRAIN" \
+        --init_method "$INIT_METHOD" \
         --calib "$CALIB" \
         --test "$TEST" \
         --test_mode "$TEST_MODE" \
@@ -236,6 +243,7 @@ for ROUND in $(seq 0 "$ROUNDS"); do
         python scripts/conformal_prediction.py \
             --run_dir "$ROUND_OUT" \
             --modality color \
+            --sigma_norm minmax_calib \
             --alpha "$ALPHA" \
             --calib_sample_ratio 0.1
     fi
@@ -243,6 +251,7 @@ for ROUND in $(seq 0 "$ROUNDS"); do
         python scripts/conformal_prediction.py \
             --run_dir "$ROUND_OUT" \
             --modality sensitivity \
+            --sigma_norm minmax_calib \
             --alpha "$ALPHA" \
             --calib_sample_ratio 0.1
     fi
@@ -250,6 +259,7 @@ for ROUND in $(seq 0 "$ROUNDS"); do
         python scripts/conformal_prediction.py \
             --run_dir "$ROUND_OUT" \
             --modality visibility \
+            --sigma_norm minmax_calib \
             --alpha "$ALPHA" \
             --calib_sample_ratio 0.1
     fi
@@ -270,6 +280,8 @@ for ROUND in $(seq 0 "$ROUNDS"); do
             --run_dir "$ROUND_OUT" \
             --splits candidate \
             --alpha "$ALPHA" \
+            --sigma_norm minmax_calib \
+            --score_top_fraction 0.10 \
             --seed "$SEED" \
             --acquisition_mode both \
             $( [ "$NEED_COLOR" -eq 1 ] || printf '%s' '--skip_color ' ) \

@@ -2,11 +2,12 @@
 Export per-view acquisition rankings for active-learning experiments.
 
 By default this computes both:
-  - raw acquisition scores: mean rendered signal over valid candidate pixels
-  - conformal acquisition scores: mean 2*q_hat*sigma over valid candidate pixels
+  - raw acquisition scores over the top uncertain foreground/valid pixels
+  - conformal acquisition scores over the top uncertain foreground/valid pixels
 
 The conformal scores use fixed calibration views to estimate q_hat and then
-apply that scalar to candidate-view sigma maps. Candidate GT is not used.
+apply that scalar to candidate-view normalized uncertainty maps. Candidate GT
+is not used.
 """
 
 import argparse
@@ -24,6 +25,40 @@ DEFAULT_SIGMA_KEYS = {
     "sensitivity": "sigma_mean",
     "visibility": "sigma_mean",
 }
+
+
+def fit_minmax_normalization(run_dir, iteration, modality, sigma_key, eps):
+    sigma_dir = run_dir / "calib" / f"ours_{iteration}" / "raw_sigma" / modality
+    if not sigma_dir.exists():
+        return None
+    values = []
+    for sigma_path in sorted(sigma_dir.glob("*.npz")):
+        sigma, mask = load_sigma(sigma_path, sigma_key)
+        valid = np.isfinite(sigma) & mask
+        if np.any(valid):
+            values.append(sigma[valid])
+    if not values:
+        return None
+    pooled = np.concatenate(values).astype(np.float32)
+    sigma_min = float(pooled.min())
+    sigma_max = float(pooled.max())
+    return {
+        "mode": "minmax_calib",
+        "sigma_min": sigma_min,
+        "sigma_max": sigma_max,
+        "sigma_scale": max(sigma_max - sigma_min, eps),
+    }
+
+
+def normalize_sigma(sigma, mask, normalization, eps):
+    sigma = np.nan_to_num(np.asarray(sigma, dtype=np.float32), nan=0.0, posinf=0.0, neginf=0.0)
+    if normalization is None or normalization.get("mode") == "none":
+        normalized = sigma.copy()
+    else:
+        normalized = (sigma - normalization["sigma_min"]) / normalization["sigma_scale"]
+        normalized = np.clip(normalized, 0.0, 1.0).astype(np.float32)
+    normalized[~mask] = 0.0
+    return normalized, np.maximum(normalized, eps)
 
 
 def find_iteration(run_dir, iteration):
@@ -93,7 +128,22 @@ def raw_stats(values, mask):
     }
 
 
-def compute_qhat(run_dir, iteration, modality, sigma_key, alpha, sample_ratio, seed, eps):
+def top_fraction_mean(values, mask, fraction):
+    valid = np.isfinite(values) & mask
+    if not np.any(valid):
+        return 0.0
+    vals = np.asarray(values[valid], dtype=np.float32)
+    fraction = float(np.clip(fraction, 0.0, 1.0))
+    if fraction <= 0.0:
+        return float(vals.max())
+    k = max(1, int(math.ceil(fraction * vals.size)))
+    if k >= vals.size:
+        return float(vals.mean())
+    topk = np.partition(vals, vals.size - k)[-k:]
+    return float(topk.mean())
+
+
+def compute_qhat(run_dir, iteration, modality, sigma_key, normalization, alpha, sample_ratio, seed, eps):
     calib_dir = run_dir / "calib" / f"ours_{iteration}"
     render_dir = calib_dir / "render"
     gt_dir = calib_dir / "gt"
@@ -112,8 +162,8 @@ def compute_qhat(run_dir, iteration, modality, sigma_key, alpha, sample_ratio, s
         gt = load_rgb(gt_dir / frame)
         sigma, mask = load_sigma(sigma_path, sigma_key)
         err = np.abs(render - gt).mean(axis=2)
-        sigma_safe = np.maximum(np.nan_to_num(sigma, nan=0.0, posinf=0.0, neginf=0.0), eps)
-        valid = (np.isfinite(err) & np.isfinite(sigma_safe) & mask).reshape(-1)
+        sigma_norm, sigma_safe = normalize_sigma(sigma, mask, normalization, eps)
+        valid = (np.isfinite(err) & np.isfinite(sigma_norm) & mask).reshape(-1)
         valid_idx = np.flatnonzero(valid)
         if valid_idx.size == 0:
             continue
@@ -129,6 +179,7 @@ def compute_qhat(run_dir, iteration, modality, sigma_key, alpha, sample_ratio, s
         "num_scores": len(scores),
         "alpha": alpha,
         "sample_ratio": sample_ratio,
+        "sigma_normalization": normalization or {"mode": "none"},
     }
 
 
@@ -151,7 +202,7 @@ def normalize_scores(rows, fields, prefix):
         row[f"{prefix}_combined_max"] = float(np.max(vals)) if vals else 0.0
 
 
-def collect_rows(run_dir, iteration, splits, sigma_keys, qhats, eps):
+def collect_rows(run_dir, iteration, splits, sigma_keys, qhats, normalizations, eps, score_top_fraction):
     rows_by_name = {}
     for split in splits:
         split_dir = run_dir / split / f"ours_{iteration}"
@@ -169,14 +220,19 @@ def collect_rows(run_dir, iteration, splits, sigma_keys, qhats, eps):
                 stats = raw_stats(sigma, mask)
                 for stat_name, value in stats.items():
                     row[f"{modality}_raw_{stat_name}"] = value
+                row[f"{modality}_raw_score"] = top_fraction_mean(sigma, mask, score_top_fraction)
 
                 qhat = qhats.get(modality)
                 if qhat is not None:
-                    sigma_safe = np.maximum(np.nan_to_num(sigma, nan=0.0, posinf=0.0, neginf=0.0), eps)
+                    sigma_norm, sigma_safe = normalize_sigma(sigma, mask, normalizations.get(modality), eps)
+                    norm_stats = raw_stats(sigma_norm, mask)
+                    for stat_name, value in norm_stats.items():
+                        row[f"{modality}_normalized_{stat_name}"] = value
                     full_width = 2.0 * qhat["q_hat"] * sigma_safe
                     conf_stats = raw_stats(full_width, mask)
                     for stat_name, value in conf_stats.items():
-                        row[f"{modality}_conformal_{stat_name}_2u"] = value
+                        row[f"{modality}_conformal_{stat_name}_full_width"] = value
+                    row[f"{modality}_conformal_score_full_width"] = top_fraction_mean(full_width, mask, score_top_fraction)
     return list(rows_by_name.values())
 
 
@@ -203,6 +259,8 @@ def main():
     parser.add_argument("--seed", default=42, type=int)
     parser.add_argument("--eps", default=1e-6, type=float)
     parser.add_argument("--acquisition_mode", choices=["both", "conformal", "raw"], default="both")
+    parser.add_argument("--sigma_norm", choices=["none", "minmax_calib"], default="minmax_calib")
+    parser.add_argument("--score_top_fraction", default=0.10, type=float, help="Rank candidates by mean of top fraction over foreground/valid pixels.")
     parser.add_argument("--color_key", default=DEFAULT_SIGMA_KEYS["color"], type=str)
     parser.add_argument("--sensitivity_key", default=DEFAULT_SIGMA_KEYS["sensitivity"], type=str)
     parser.add_argument("--visibility_key", default=DEFAULT_SIGMA_KEYS["visibility"], type=str)
@@ -223,27 +281,32 @@ def main():
         sigma_keys["sensitivity"] = args.sensitivity_key
     if not args.skip_visibility:
         sigma_keys["visibility"] = args.visibility_key
+    normalizations = {}
     qhats = {}
     if args.acquisition_mode in ("both", "conformal"):
         for modality, key in sigma_keys.items():
+            normalizations[modality] = (
+                {"mode": "none"} if args.sigma_norm == "none" else fit_minmax_normalization(run_dir, iteration, modality, key, args.eps)
+            )
             qhats[modality] = compute_qhat(
                 run_dir,
                 iteration,
                 modality,
                 key,
+                normalizations[modality],
                 args.alpha,
                 args.calib_sample_ratio,
                 args.seed,
                 args.eps,
             )
-    rows = collect_rows(run_dir, iteration, args.splits, sigma_keys, qhats, args.eps)
+    rows = collect_rows(run_dir, iteration, args.splits, sigma_keys, qhats, normalizations, args.eps, args.score_top_fraction)
     rows = sorted(rows, key=lambda row: row["frame"])
 
-    raw_fields = ["color_raw_mean", "sensitivity_raw_mean", "visibility_raw_mean"]
+    raw_fields = ["color_raw_score", "sensitivity_raw_score", "visibility_raw_score"]
     conformal_fields = [
-        "color_conformal_mean_2u",
-        "sensitivity_conformal_mean_2u",
-        "visibility_conformal_mean_2u",
+        "color_conformal_score_full_width",
+        "sensitivity_conformal_score_full_width",
+        "visibility_conformal_score_full_width",
     ]
     if args.acquisition_mode in ("both", "raw"):
         normalize_scores(rows, raw_fields, "raw")
@@ -259,13 +322,13 @@ def main():
 
     rankings = {}
     ranking_keys = {
-        "raw_color": "color_raw_mean",
-        "raw_sensitivity": "sensitivity_raw_mean",
-        "raw_visibility": "visibility_raw_mean",
+        "raw_color": "color_raw_score",
+        "raw_sensitivity": "sensitivity_raw_score",
+        "raw_visibility": "visibility_raw_score",
         "raw_combined": "raw_combined_mean",
-        "conformal_color": "color_conformal_mean_2u",
-        "conformal_sensitivity": "sensitivity_conformal_mean_2u",
-        "conformal_visibility": "visibility_conformal_mean_2u",
+        "conformal_color": "color_conformal_score_full_width",
+        "conformal_sensitivity": "sensitivity_conformal_score_full_width",
+        "conformal_visibility": "visibility_conformal_score_full_width",
         "conformal_combined": "conformal_combined_mean",
     }
     for name, key in ranking_keys.items():
@@ -277,6 +340,10 @@ def main():
         "iteration": iteration,
         "splits": args.splits,
         "sigma_keys": sigma_keys,
+        "sigma_norm": args.sigma_norm,
+        "sigma_normalizations": normalizations,
+        "score_top_fraction": args.score_top_fraction,
+        "score_region": "top_fraction_foreground_valid_pixels",
         "acquisition_mode": args.acquisition_mode,
         "conformal_qhats": qhats,
         "num_views": len(rows),
